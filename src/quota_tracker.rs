@@ -249,6 +249,15 @@ impl QuotaTracker {
         };
     }
 
+    /// Apply server quota state and persist locally
+    pub fn apply_server_quota(&mut self, used: u32, limit: u32) -> Result<()> {
+        self.state.used = used;
+        self.daily_limit = limit;
+        self.state.last_sync = Some(Utc::now());
+        self.save_state()?;
+        Ok(())
+    }
+
     /// Get quota status summary
     pub fn status(&self) -> QuotaStatus {
         QuotaStatus {

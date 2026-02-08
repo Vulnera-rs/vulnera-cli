@@ -492,14 +492,8 @@ impl VulneraClient {
     }
 
     /// Generate a code fix using the server's LLM endpoint
-    pub async fn generate_code_fix(
-        &self,
-        request: &LlmFixRequest,
-    ) -> Result<LlmFixResponse> {
-        let url = format!(
-            "{}/api/v1/llm/fix",
-            self.base_url.trim_end_matches('/')
-        );
+    pub async fn generate_code_fix(&self, request: &LlmFixRequest) -> Result<LlmFixResponse> {
+        let url = format!("{}/api/v1/llm/fix", self.base_url.trim_end_matches('/'));
 
         let mut req = self.client.post(&url).json(request);
 

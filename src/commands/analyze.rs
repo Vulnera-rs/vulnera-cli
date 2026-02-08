@@ -8,22 +8,17 @@
 //!
 //! In offline mode, runs all offline modules and skips deps with a warning.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use anyhow::Result;
 use clap::Args;
 use serde::Serialize;
-use uuid::Uuid;
-use vulnera_api::module::ApiSecurityModule;
-use vulnera_core::domain::module::{AnalysisModule, ModuleConfig};
-use vulnera_sast::module::SastModule;
-use vulnera_secrets::module::SecretDetectionModule;
 
 use crate::Cli;
 use crate::context::CliContext;
 use crate::exit_codes;
 use crate::output::{OutputFormat, ProgressIndicator, VulnerabilityDisplay};
-use crate::severity::{parse_severity, severity_meets_minimum_str};
+use crate::severity::severity_meets_minimum_str;
 
 /// Arguments for the analyze command
 #[derive(Args, Debug)]
@@ -120,8 +115,16 @@ pub struct AnalysisSummary {
     pub duration_ms: u64,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DepsRunStatus {
+    Ran,
+    Skipped,
+    Failed,
+    QuotaExceeded,
+}
+
 /// Run the analyze command
-pub async fn run(ctx: &CliContext, cli: &Cli, args: &AnalyzeArgs) -> Result<i32> {
+pub async fn run(ctx: &mut CliContext, cli: &Cli, args: &AnalyzeArgs) -> Result<i32> {
     let start = std::time::Instant::now();
 
     // Resolve path
@@ -155,8 +158,6 @@ pub async fn run(ctx: &CliContext, cli: &Cli, args: &AnalyzeArgs) -> Result<i32>
         None
     };
 
-    let _min_severity = parse_severity(&args.min_severity);
-
     let mut result = AnalysisResult {
         path: path.clone(),
         vulnerabilities: Vec::new(),
@@ -172,6 +173,7 @@ pub async fn run(ctx: &CliContext, cli: &Cli, args: &AnalyzeArgs) -> Result<i32>
         modules_run: Vec::new(),
         warnings: Vec::new(),
     };
+    let mut quota_exceeded = false;
 
     // Run SAST analysis (works offline)
     if !args.skip_sast {
@@ -179,7 +181,7 @@ pub async fn run(ctx: &CliContext, cli: &Cli, args: &AnalyzeArgs) -> Result<i32>
             p.set_message("Running static analysis (SAST)...");
         }
 
-        run_sast_analysis(&path, &mut result).await;
+        run_sast_analysis(ctx, &path, &mut result).await;
         result.modules_run.push("sast".to_string());
     }
 
@@ -189,7 +191,7 @@ pub async fn run(ctx: &CliContext, cli: &Cli, args: &AnalyzeArgs) -> Result<i32>
             p.set_message("Detecting secrets...");
         }
 
-        run_secrets_analysis(&path, &mut result).await;
+        run_secrets_analysis(ctx, &path, &mut result).await;
         result.modules_run.push("secrets".to_string());
     }
 
@@ -199,7 +201,7 @@ pub async fn run(ctx: &CliContext, cli: &Cli, args: &AnalyzeArgs) -> Result<i32>
             p.set_message("Analyzing API endpoints...");
         }
 
-        run_api_analysis(&path, &mut result).await;
+        run_api_analysis(ctx, &path, &mut result).await;
         result.modules_run.push("api".to_string());
     }
 
@@ -219,8 +221,15 @@ pub async fn run(ctx: &CliContext, cli: &Cli, args: &AnalyzeArgs) -> Result<i32>
                 p.set_message("Scanning dependencies (requires server)...");
             }
 
-            run_deps_analysis(ctx, &path, &mut result, &args.min_severity).await;
-            result.modules_run.push("deps".to_string());
+            match run_deps_analysis(ctx, &path, &mut result, &args.min_severity).await {
+                DepsRunStatus::Ran => {
+                    result.modules_run.push("deps".to_string());
+                }
+                DepsRunStatus::QuotaExceeded => {
+                    quota_exceeded = true;
+                }
+                DepsRunStatus::Skipped | DepsRunStatus::Failed => {}
+            }
         }
     }
 
@@ -288,7 +297,9 @@ pub async fn run(ctx: &CliContext, cli: &Cli, args: &AnalyzeArgs) -> Result<i32>
     }
 
     // Determine exit code
-    if args.fail_on_vuln && !result.vulnerabilities.is_empty() {
+    if quota_exceeded {
+        Ok(exit_codes::QUOTA_EXCEEDED)
+    } else if args.fail_on_vuln && !result.vulnerabilities.is_empty() {
         Ok(exit_codes::VULNERABILITIES_FOUND)
     } else {
         Ok(exit_codes::SUCCESS)
@@ -296,33 +307,21 @@ pub async fn run(ctx: &CliContext, cli: &Cli, args: &AnalyzeArgs) -> Result<i32>
 }
 
 /// Run SAST analysis
-async fn run_sast_analysis(path: &PathBuf, result: &mut AnalysisResult) {
-    let sast_module = SastModule::new();
-    let config = ModuleConfig {
-        job_id: Uuid::new_v4(),
-        project_id: "cli-local".to_string(),
-        source_uri: path.to_string_lossy().to_string(),
-        config: Default::default(),
-    };
-
-    match sast_module.execute(&config).await {
+async fn run_sast_analysis(ctx: &CliContext, path: &Path, result: &mut AnalysisResult) {
+    match ctx.executor.run_sast(path).await {
         Ok(res) => {
-            result.summary.files_scanned += res.metadata.files_scanned;
+            result.summary.files_scanned += res.files_scanned;
 
             for finding in res.findings {
                 result.vulnerabilities.push(VulnerabilityInfo {
                     id: finding.rule_id.unwrap_or_else(|| finding.id.clone()),
-                    severity: format!("{:?}", finding.severity).to_lowercase(),
-                    package: finding.location.path.clone(),
-                    version: finding
-                        .location
-                        .line
-                        .map(|l| format!("L{}", l))
-                        .unwrap_or_default(),
+                    severity: finding.severity,
+                    package: finding.file.clone(),
+                    version: finding.line.map(|l| format!("L{}", l)).unwrap_or_default(),
                     description: finding.description,
-                    module: "sast".to_string(),
-                    file: Some(finding.location.path),
-                    line: finding.location.line,
+                    module: finding.module,
+                    file: Some(finding.file),
+                    line: finding.line,
                     fix_available: finding.recommendation.is_some(),
                     fixed_version: None,
                 });
@@ -335,34 +334,22 @@ async fn run_sast_analysis(path: &PathBuf, result: &mut AnalysisResult) {
 }
 
 /// Run secrets analysis
-async fn run_secrets_analysis(path: &PathBuf, result: &mut AnalysisResult) {
-    let secrets_module = SecretDetectionModule::new();
-    let config = ModuleConfig {
-        job_id: Uuid::new_v4(),
-        project_id: "cli-local".to_string(),
-        source_uri: path.to_string_lossy().to_string(),
-        config: Default::default(),
-    };
-
-    match secrets_module.execute(&config).await {
+async fn run_secrets_analysis(ctx: &CliContext, path: &Path, result: &mut AnalysisResult) {
+    match ctx.executor.run_secrets(path).await {
         Ok(res) => {
-            result.summary.files_scanned += res.metadata.files_scanned;
+            result.summary.files_scanned += res.files_scanned;
 
             for finding in res.findings {
                 result.vulnerabilities.push(VulnerabilityInfo {
                     id: finding.rule_id.unwrap_or_else(|| finding.id.clone()),
-                    severity: format!("{:?}", finding.severity).to_lowercase(),
-                    package: finding.location.path.clone(),
-                    version: finding
-                        .location
-                        .line
-                        .map(|l| format!("L{}", l))
-                        .unwrap_or_default(),
+                    severity: finding.severity,
+                    package: finding.file.clone(),
+                    version: finding.line.map(|l| format!("L{}", l)).unwrap_or_default(),
                     description: finding.description,
-                    module: "secrets".to_string(),
-                    file: Some(finding.location.path),
-                    line: finding.location.line,
-                    fix_available: true,
+                    module: finding.module,
+                    file: Some(finding.file),
+                    line: finding.line,
+                    fix_available: finding.recommendation.is_some(),
                     fixed_version: None,
                 });
             }
@@ -376,31 +363,19 @@ async fn run_secrets_analysis(path: &PathBuf, result: &mut AnalysisResult) {
 }
 
 /// Run API analysis
-async fn run_api_analysis(path: &PathBuf, result: &mut AnalysisResult) {
-    let api_module = ApiSecurityModule::new();
-    let config = ModuleConfig {
-        job_id: Uuid::new_v4(),
-        project_id: "cli-local".to_string(),
-        source_uri: path.to_string_lossy().to_string(),
-        config: Default::default(),
-    };
-
-    match api_module.execute(&config).await {
+async fn run_api_analysis(ctx: &CliContext, path: &Path, result: &mut AnalysisResult) {
+    match ctx.executor.run_api(path).await {
         Ok(res) => {
             for finding in res.findings {
                 result.vulnerabilities.push(VulnerabilityInfo {
                     id: finding.rule_id.unwrap_or_else(|| finding.id.clone()),
-                    severity: format!("{:?}", finding.severity).to_lowercase(),
-                    package: finding.location.path.clone(),
-                    version: finding
-                        .location
-                        .line
-                        .map(|l| format!("L{}", l))
-                        .unwrap_or_default(),
+                    severity: finding.severity,
+                    package: finding.file.clone(),
+                    version: finding.line.map(|l| format!("L{}", l)).unwrap_or_default(),
                     description: finding.description,
-                    module: "api".to_string(),
-                    file: Some(finding.location.path),
-                    line: finding.location.line,
+                    module: finding.module,
+                    file: Some(finding.file),
+                    line: finding.line,
                     fix_available: finding.recommendation.is_some(),
                     fixed_version: None,
                 });
@@ -420,28 +395,51 @@ async fn run_api_analysis(path: &PathBuf, result: &mut AnalysisResult) {
 
 /// Run deps analysis (requires server)
 async fn run_deps_analysis(
-    ctx: &CliContext,
-    path: &PathBuf,
+    ctx: &mut CliContext,
+    path: &Path,
     result: &mut AnalysisResult,
     min_severity: &str,
-) {
+) -> DepsRunStatus {
     // Use the executor's already-configured API client if available
     if !ctx.executor.has_api_client() {
         result
             .warnings
             .push("Dependency analysis requires server connection".to_string());
-        return;
+        return DepsRunStatus::Skipped;
     }
 
-    let client = match ctx.executor.get_api_client() {
+    let client = match ctx.executor.get_api_client().cloned() {
         Some(c) => c,
         None => {
             result
                 .warnings
                 .push("API client not available for dependency analysis".to_string());
-            return;
+            return DepsRunStatus::Skipped;
         }
     };
+
+    if ctx.remaining_quota() == 0 {
+        result
+            .warnings
+            .push("Quota exceeded - dependency analysis skipped".to_string());
+        return DepsRunStatus::QuotaExceeded;
+    }
+
+    match ctx.consume_quota().await {
+        Ok(true) => {}
+        Ok(false) => {
+            result
+                .warnings
+                .push("Quota exceeded - dependency analysis skipped".to_string());
+            return DepsRunStatus::QuotaExceeded;
+        }
+        Err(e) => {
+            result
+                .warnings
+                .push(format!("Failed to consume quota: {}", e));
+            return DepsRunStatus::Failed;
+        }
+    }
 
     match client.analyze_dependencies(path, None, false).await {
         Ok(response) => {
@@ -461,11 +459,13 @@ async fn run_deps_analysis(
                     });
                 }
             }
+            DepsRunStatus::Ran
         }
         Err(e) => {
             result
                 .warnings
                 .push(format!("Dependency analysis failed: {}", e));
+            DepsRunStatus::Failed
         }
     }
 }
@@ -473,6 +473,9 @@ async fn run_deps_analysis(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::severity::{
+        FindingSeverity, parse_severity, severity_meets_minimum, severity_meets_minimum_str,
+    };
 
     #[test]
     fn test_parse_severity() {
@@ -480,9 +483,15 @@ mod tests {
         assert_eq!(parse_severity("high"), FindingSeverity::High);
         assert_eq!(parse_severity("medium"), FindingSeverity::Medium);
         assert_eq!(parse_severity("low"), FindingSeverity::Low);
-        assert_eq!(parse_severity("info"), FindingSeverity::Low); // Default fallback
+        assert_eq!(parse_severity("info"), FindingSeverity::Info); // Info is preserved
         assert_eq!(parse_severity("unknown"), FindingSeverity::Low); // Default fallback
         assert_eq!(parse_severity("CRITICAL"), FindingSeverity::Critical); // Case insensitive
+    }
+
+    #[test]
+    fn test_severity_meets_minimuma_str() {
+        assert!(severity_meets_minimum_str("critical", "high"));
+        assert!(!severity_meets_minimum_str("high", "critical"));
     }
 
     #[test]

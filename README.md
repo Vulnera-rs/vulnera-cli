@@ -9,6 +9,7 @@
 ## Overview
 
 Vulnera CLI is a standalone vulnerability scanner that combines:
+
 - **Offline Analysis** (no network required): SAST, Secrets Detection, API Security
 - **Online Analysis** (with optional server): Dependency Vulnerability Scanning
 
@@ -42,12 +43,12 @@ Total: 62 issues found
 
 ### 🔍 Analysis Modules
 
-| Module | Type | Network | Speed | Coverage |
-|--------|------|---------|-------|----------|
-| **SAST** | Static analysis | Offline | Fast | Code quality, logic bugs, injection flaws |
-| **Secrets** | Credential scanning | Offline | Fast | API keys, passwords, tokens, PII |
-| **API Security** | Endpoint analysis | Offline | Fast | Authentication, authorization, data exposure |
-| **Dependencies** | CVE scanning | Online | Medium | Known vulnerabilities in packages |
+| Module           | Type                | Network | Speed  | Coverage                                     |
+| ---------------- | ------------------- | ------- | ------ | -------------------------------------------- |
+| **SAST**         | Static analysis     | Offline | Fast   | Code quality, logic bugs, injection flaws    |
+| **Secrets**      | Credential scanning | Offline | Fast   | API keys, passwords, tokens, PII             |
+| **API Security** | Endpoint analysis   | Offline | Fast   | Authentication, authorization, data exposure |
+| **Dependencies** | CVE scanning        | Online  | Medium | Known vulnerabilities in packages            |
 
 ### ⚡ Key Capabilities
 
@@ -211,8 +212,18 @@ vulnera quota status
 vulnera generate-fix \
   --vulnerability CVE-2024-1234 \
   --code "vulnerable_code.rs" \
+  --line 42 \
+  --description "Use safe parsing instead of eval" \
   --language rust
 ```
+
+Arguments:
+
+- `--vulnerability <ID>`: Vulnerability identifier (e.g., CVE)
+- `--code <PATH>`: Path to the vulnerable file
+- `--line <LINE>`: Line number of the issue
+- `--description <TEXT>`: Optional description to improve fix quality
+- `--language <LANG>`: Optional language override (auto-detected if omitted)
 
 ## Command Reference
 
@@ -233,6 +244,7 @@ vulnera generate-fix \
 ### Commands
 
 #### `analyze [PATH]`
+
 Run comprehensive vulnerability analysis.
 
 ```bash
@@ -251,6 +263,7 @@ OPTIONS:
 ```
 
 #### `sast [PATH]`
+
 Static application security testing (offline).
 
 ```bash
@@ -260,6 +273,7 @@ vulnera sast . [OPTIONS]
 ```
 
 #### `secrets [PATH]`
+
 Detect hardcoded credentials and secrets (offline).
 
 ```bash
@@ -269,6 +283,7 @@ vulnera secrets . [OPTIONS]
 ```
 
 #### `api [PATH]`
+
 Analyze API endpoints for security issues (offline).
 
 ```bash
@@ -277,6 +292,7 @@ vulnera api . [OPTIONS]
 ```
 
 #### `deps [PATH]`
+
 Scan dependencies for known vulnerabilities (requires server).
 
 ```bash
@@ -285,7 +301,21 @@ vulnera deps . [OPTIONS]
   --compact                   Compact output format
 ```
 
+#### `generate-fix`
+
+Generate an AI-assisted fix for a specific vulnerability (requires server + authentication).
+
+```bash
+vulnera generate-fix \
+  --vulnerability <ID> \
+  --code <PATH> \
+  --line <LINE> \
+  --description <TEXT> \
+  --language <LANG>
+```
+
 #### `quota`
+
 Manage and check quota usage.
 
 ```bash
@@ -294,6 +324,7 @@ vulnera quota reset               Reset quota (debug only)
 ```
 
 #### `auth`
+
 Authentication and credential management.
 
 ```bash
@@ -305,6 +336,7 @@ vulnera auth info               Show credential storage location
 ```
 
 #### `config`
+
 Manage configuration.
 
 ```bash
@@ -472,11 +504,13 @@ SARIF (Static Analysis Results Interchange Format) for IDE and CI integration:
 ## Authentication & Quota
 
 ### Free Tier
+
 - **Limit**: 10 requests/day
 - **Modules**: Offline analysis only
 - **Storage**: No credential storage
 
 ### Authenticated (API Key)
+
 - **Limit**: 40 requests/day
 - **Modules**: All modules including dependencies
 - **Storage**: OS keyring or encrypted file
@@ -559,15 +593,15 @@ jobs:
 
 For CI/CD integration, Vulnera returns specific exit codes:
 
-| Code | Meaning |
-|------|---------|
-| `0` | Success - no vulnerabilities found |
-| `1` | Vulnerabilities found (with `--fail-on-vuln`) |
-| `2` | Configuration or input error |
-| `3` | Network error (when online mode required) |
-| `4` | Quota exceeded |
-| `5` | Authentication required but not provided |
-| `99` | Internal error |
+| Code | Meaning                                       |
+| ---- | --------------------------------------------- |
+| `0`  | Success - no vulnerabilities found            |
+| `1`  | Vulnerabilities found (with `--fail-on-vuln`) |
+| `2`  | Configuration or input error                  |
+| `3`  | Network error (when online mode required)     |
+| `4`  | Quota exceeded                                |
+| `5`  | Authentication required but not provided      |
+| `99` | Internal error                                |
 
 ## Performance
 

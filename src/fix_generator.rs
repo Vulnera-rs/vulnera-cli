@@ -105,6 +105,8 @@ pub struct CodeFixRequest {
     pub code_context: String,
     pub file_path: String,
     pub line_number: u32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub language: Option<String>,
 }
 
 /// Response from the code fix endpoint
@@ -129,6 +131,19 @@ impl FixGenerator {
         file_path: &Path,
         line: u32,
     ) -> Result<Option<CodeFix>> {
+        self.generate_fix_with_language(finding_id, description, file_path, line, None)
+            .await
+    }
+
+    /// Generate a fix with an explicit language override
+    pub async fn generate_fix_with_language(
+        &self,
+        finding_id: &str,
+        description: &str,
+        file_path: &Path,
+        line: u32,
+        language_override: Option<&str>,
+    ) -> Result<Option<CodeFix>> {
         // Read file content around the finding
         let code_context = self.read_code_context(file_path, line)?;
 
@@ -138,6 +153,7 @@ impl FixGenerator {
             code_context,
             file_path: file_path.to_string_lossy().to_string(),
             line_number: line,
+            language: language_override.map(|l| l.to_string()),
         };
 
         match self.call_fix_endpoint(request).await {
@@ -179,7 +195,10 @@ impl FixGenerator {
         let llm_request = LlmFixRequest {
             vulnerability_id: request.finding_id.clone(),
             vulnerable_code: request.code_context.clone(),
-            language: detect_language_from_path(&request.file_path),
+            language: request
+                .language
+                .clone()
+                .unwrap_or_else(|| detect_language_from_path(&request.file_path)),
             context: Some(format!(
                 "{}:{} — {}",
                 request.file_path, request.line_number, request.vulnerability_description
@@ -228,7 +247,7 @@ impl FixGenerator {
 }
 
 /// Infer programming language from a file path extension.
-fn detect_language_from_path(path: &str) -> String {
+pub fn detect_language_from_path(path: &str) -> String {
     let ext = Path::new(path)
         .extension()
         .and_then(|e| e.to_str())

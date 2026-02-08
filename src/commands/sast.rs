@@ -374,25 +374,23 @@ fn output_results(
                     result.files_scanned,
                     duration.as_secs_f64()
                 ));
-            } else {
-                if !cli.quiet {
-                    ctx.output.print_findings_table(&result.findings);
+            } else if !cli.quiet {
+                ctx.output.print_findings_table(&result.findings);
 
-                    ctx.output.print(&format!(
-                        "\nSummary: {} total ({} critical, {} high, {} medium, {} low)",
-                        result.summary.total_findings,
-                        result.summary.critical,
-                        result.summary.high,
-                        result.summary.medium,
-                        result.summary.low
-                    ));
+                ctx.output.print(&format!(
+                    "\nSummary: {} total ({} critical, {} high, {} medium, {} low)",
+                    result.summary.total_findings,
+                    result.summary.critical,
+                    result.summary.high,
+                    result.summary.medium,
+                    result.summary.low
+                ));
 
-                    ctx.output.print(&format!(
-                        "Scanned {} files in {:.2}s",
-                        result.files_scanned,
-                        duration.as_secs_f64()
-                    ));
-                }
+                ctx.output.print(&format!(
+                    "Scanned {} files in {:.2}s",
+                    result.files_scanned,
+                    duration.as_secs_f64()
+                ));
             }
         }
     }

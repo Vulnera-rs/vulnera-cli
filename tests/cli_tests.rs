@@ -103,6 +103,16 @@ fn test_config_help() {
 }
 
 #[test]
+fn test_generate_fix_help() {
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_vulnera"));
+    cmd.arg("generate-fix")
+        .arg("--help")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Generate an AI-assisted fix"));
+}
+
+#[test]
 fn test_json_output_format() {
     // Test that --format json flag is accepted
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_vulnera"));

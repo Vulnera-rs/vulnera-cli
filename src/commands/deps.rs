@@ -9,7 +9,7 @@
 //! Use `--force-rescan` to bypass the cache.
 
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use anyhow::Result;
 use clap::Args;
@@ -124,7 +124,7 @@ pub struct DepsSummary {
 }
 
 /// Run the deps command
-pub async fn run(ctx: &CliContext, cli: &Cli, args: &DepsArgs) -> Result<i32> {
+pub async fn run(ctx: &mut CliContext, cli: &Cli, args: &DepsArgs) -> Result<i32> {
     let start = std::time::Instant::now();
 
     // Resolve path
@@ -232,6 +232,17 @@ pub async fn run(ctx: &CliContext, cli: &Cli, args: &DepsArgs) -> Result<i32> {
         if let Some(pm) = &package_manager {
             p.set_message(&format!("Found {} project, analyzing...", pm));
         }
+    }
+
+    if ctx.remaining_quota() == 0 {
+        ctx.output.error("Quota exceeded");
+        ctx.output.info("Run 'vulnera quota status' for details");
+        return Ok(exit_codes::QUOTA_EXCEEDED);
+    }
+
+    if !ctx.consume_quota().await? {
+        ctx.output.error("Quota exceeded");
+        return Ok(exit_codes::QUOTA_EXCEEDED);
     }
 
     // Call server API
@@ -347,7 +358,7 @@ pub async fn run(ctx: &CliContext, cli: &Cli, args: &DepsArgs) -> Result<i32> {
 }
 
 /// Detect package manager and manifest file
-fn detect_package_manager(path: &PathBuf) -> (Option<String>, Option<String>) {
+fn detect_package_manager(path: &Path) -> (Option<String>, Option<String>) {
     let manifests = [
         ("package.json", "npm"),
         ("package-lock.json", "npm"),
@@ -390,7 +401,7 @@ fn severity_meets_minimum(severity: &str, minimum: &str) -> bool {
 /// Convert cached result back to DepsResult
 fn convert_cached_result(
     cached: &CachedDepsResult,
-    path: &PathBuf,
+    path: &Path,
     manifest_file: Option<String>,
     package_manager: Option<String>,
     min_severity: &str,
@@ -436,7 +447,7 @@ fn convert_cached_result(
     }
 
     DepsResult {
-        path: path.clone(),
+        path: path.to_path_buf(),
         manifest_file,
         package_manager,
         dependencies: Vec::new(), // Cached result doesn't include full dependency list

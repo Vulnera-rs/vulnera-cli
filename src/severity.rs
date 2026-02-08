@@ -3,7 +3,7 @@
 //! This module provides unified severity handling used across all CLI commands
 //! to eliminate code duplication and ensure consistent behavior.
 
-use vulnera_core::domain::module::FindingSeverity;
+pub use vulnera_core::domain::module::FindingSeverity;
 
 /// Parse a severity string to FindingSeverity enum
 ///

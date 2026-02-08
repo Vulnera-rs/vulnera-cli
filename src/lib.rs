@@ -113,6 +113,10 @@ pub enum Commands {
     /// Configuration management
     #[command(visible_alias = "cfg")]
     Config(commands::config::ConfigArgs),
+
+    /// Generate an AI-assisted fix for a vulnerability
+    #[command(visible_alias = "fix")]
+    GenerateFix(commands::generate_fix::GenerateFixArgs),
 }
 
 /// Output format for CLI results
@@ -156,20 +160,25 @@ impl CliApp {
 
     /// Run the CLI application
     pub async fn run(self) -> anyhow::Result<i32> {
+        let mut context = self.context;
+
         let exit_code = match self.cli.command {
             Commands::Analyze(ref args) => {
-                commands::analyze::run(&self.context, &self.cli, args).await
+                commands::analyze::run(&mut context, &self.cli, args).await
             }
-            Commands::Deps(ref args) => commands::deps::run(&self.context, &self.cli, args).await,
-            Commands::Sast(ref args) => commands::sast::run(&self.context, &self.cli, args).await,
+            Commands::Deps(ref args) => commands::deps::run(&mut context, &self.cli, args).await,
+            Commands::Sast(ref args) => commands::sast::run(&context, &self.cli, args).await,
             Commands::Secrets(ref args) => {
-                commands::secrets::run(&self.context, &self.cli, args).await
+                commands::secrets::run(&context, &self.cli, args).await
             }
-            Commands::Api(ref args) => commands::api::run(&self.context, &self.cli, args).await,
-            Commands::Quota(ref args) => commands::quota::run(&self.context, &self.cli, args).await,
-            Commands::Auth(ref args) => commands::auth::run(&self.context, &self.cli, args).await,
+            Commands::Api(ref args) => commands::api::run(&context, &self.cli, args).await,
+            Commands::Quota(ref args) => commands::quota::run(&mut context, &self.cli, args).await,
+            Commands::Auth(ref args) => commands::auth::run(&context, &self.cli, args).await,
             Commands::Config(ref args) => {
-                commands::config::run(&self.context, &self.cli, args).await
+                commands::config::run(&context, &self.cli, args).await
+            }
+            Commands::GenerateFix(ref args) => {
+                commands::generate_fix::run(&mut context, &self.cli, args).await
             }
         }?;
 

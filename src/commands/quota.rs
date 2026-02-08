@@ -42,7 +42,7 @@ pub struct QuotaInfo {
 }
 
 /// Run the quota command
-pub async fn run(ctx: &CliContext, cli: &Cli, args: &QuotaArgs) -> Result<i32> {
+pub async fn run(ctx: &mut CliContext, cli: &Cli, args: &QuotaArgs) -> Result<i32> {
     let command = args.command.unwrap_or(QuotaCommand::Show);
 
     match command {
@@ -140,7 +140,7 @@ async fn show_quota(ctx: &CliContext, cli: &Cli) -> Result<i32> {
 }
 
 /// Sync quota with remote server
-async fn sync_quota(ctx: &CliContext, cli: &Cli) -> Result<i32> {
+async fn sync_quota(ctx: &mut CliContext, cli: &Cli) -> Result<i32> {
     if cli.offline {
         ctx.output.error("Cannot sync quota in offline mode");
         return Ok(exit_codes::NETWORK_ERROR);
@@ -157,6 +157,8 @@ async fn sync_quota(ctx: &CliContext, cli: &Cli) -> Result<i32> {
 
     match client.get_quota().await {
         Ok(server_quota) => {
+            ctx.quota
+                .apply_server_quota(server_quota.used, server_quota.limit)?;
             ctx.output.success("Quota synced successfully");
             ctx.output.print(&format!(
                 "Server quota: {}/{} ({} remaining)",
@@ -164,8 +166,6 @@ async fn sync_quota(ctx: &CliContext, cli: &Cli) -> Result<i32> {
                 server_quota.limit,
                 server_quota.limit - server_quota.used
             ));
-
-            // Note: In full implementation, we'd update local state here
         }
         Err(e) => {
             ctx.output.error(&format!("Failed to sync quota: {}", e));
@@ -177,7 +177,7 @@ async fn sync_quota(ctx: &CliContext, cli: &Cli) -> Result<i32> {
 }
 
 /// Reset local quota (hidden command for debugging)
-async fn reset_quota(ctx: &CliContext, cli: &Cli) -> Result<i32> {
+async fn reset_quota(ctx: &mut CliContext, cli: &Cli) -> Result<i32> {
     // Confirm in interactive mode
     if !cli.ci {
         let confirm = crate::output::confirm(
@@ -191,8 +191,12 @@ async fn reset_quota(ctx: &CliContext, cli: &Cli) -> Result<i32> {
         }
     }
 
-    // Reset would require mutable access to quota tracker
-    // For now, just show what would happen
+    if let Err(e) = ctx.quota.reset() {
+        ctx.output
+            .error(&format!("Failed to reset local quota: {}", e));
+        return Ok(exit_codes::INTERNAL_ERROR);
+    }
+
     ctx.output.warn("Local quota reset (debug command)");
     ctx.output
         .info("Note: This does not affect server-side quota tracking");
