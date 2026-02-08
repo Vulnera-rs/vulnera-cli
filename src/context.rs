@@ -146,10 +146,8 @@ impl CliContext {
             }
 
             // Try stored credential
-            if let Ok(key_opt) = credentials.get_api_key() {
-                if let Some(key) = key_opt {
-                    return Ok(Some(key));
-                }
+            if let Ok(Some(key)) = credentials.get_api_key() {
+                return Ok(Some(key));
             }
         }
 

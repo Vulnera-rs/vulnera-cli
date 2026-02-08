@@ -91,13 +91,7 @@ impl FileCache {
 
         let content = fs::read_to_string(&cache_file).context("Failed to read cache file")?;
 
-        self.entries = match serde_json::from_str(&content) {
-            Ok(entries) => entries,
-            Err(_) => {
-                // Invalid cache, start fresh
-                HashMap::new()
-            }
-        };
+        self.entries = serde_json::from_str(&content).unwrap_or_default();
 
         Ok(())
     }

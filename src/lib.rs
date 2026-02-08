@@ -168,15 +168,11 @@ impl CliApp {
             }
             Commands::Deps(ref args) => commands::deps::run(&mut context, &self.cli, args).await,
             Commands::Sast(ref args) => commands::sast::run(&context, &self.cli, args).await,
-            Commands::Secrets(ref args) => {
-                commands::secrets::run(&context, &self.cli, args).await
-            }
+            Commands::Secrets(ref args) => commands::secrets::run(&context, &self.cli, args).await,
             Commands::Api(ref args) => commands::api::run(&context, &self.cli, args).await,
             Commands::Quota(ref args) => commands::quota::run(&mut context, &self.cli, args).await,
             Commands::Auth(ref args) => commands::auth::run(&context, &self.cli, args).await,
-            Commands::Config(ref args) => {
-                commands::config::run(&context, &self.cli, args).await
-            }
+            Commands::Config(ref args) => commands::config::run(&context, &self.cli, args).await,
             Commands::GenerateFix(ref args) => {
                 commands::generate_fix::run(&mut context, &self.cli, args).await
             }
