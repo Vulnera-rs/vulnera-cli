@@ -390,11 +390,13 @@ impl ProgressIndicator {
     /// Create a new spinner progress indicator
     pub fn spinner(message: &str) -> Self {
         let bar = indicatif::ProgressBar::new_spinner();
-        bar.set_style(
-            indicatif::ProgressStyle::default_spinner()
-                .template("{spinner:.green} {msg}")
-                .expect("Valid template"),
-        );
+        let spinner_style = indicatif::ProgressStyle::default_spinner()
+            .template("{spinner:.green} {msg}")
+            .unwrap_or_else(|e| {
+                eprintln!("Invalid spinner template: {}", e);
+                indicatif::ProgressStyle::default_spinner()
+            });
+        bar.set_style(spinner_style);
         bar.set_message(message.to_string());
         bar.enable_steady_tick(std::time::Duration::from_millis(100));
         Self { bar }
@@ -403,12 +405,14 @@ impl ProgressIndicator {
     /// Create a progress bar with known length
     pub fn bar(len: u64, message: &str) -> Self {
         let bar = indicatif::ProgressBar::new(len);
-        bar.set_style(
-            indicatif::ProgressStyle::default_bar()
-                .template("{spinner:.green} [{bar:40.cyan/blue}] {pos}/{len} {msg}")
-                .expect("Valid template")
-                .progress_chars("█▓░"),
-        );
+        let bar_style = indicatif::ProgressStyle::default_bar()
+            .template("{spinner:.green} [{bar:40.cyan/blue}] {pos}/{len} {msg}")
+            .unwrap_or_else(|e| {
+                eprintln!("Invalid progress bar template: {}", e);
+                indicatif::ProgressStyle::default_bar()
+            })
+            .progress_chars("█▓░");
+        bar.set_style(bar_style);
         bar.set_message(message.to_string());
         Self { bar }
     }

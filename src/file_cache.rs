@@ -255,12 +255,13 @@ impl Drop for FileCache {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use anyhow::Result;
     use tempfile::TempDir;
 
-    fn create_test_cache() -> (FileCache, TempDir) {
-        let temp_dir = TempDir::new().unwrap();
-        let cache = FileCache::new(temp_dir.path()).unwrap();
-        (cache, temp_dir)
+    fn create_test_cache() -> Result<(FileCache, TempDir)> {
+        let temp_dir = TempDir::new()?;
+        let cache = FileCache::new(temp_dir.path())?;
+        Ok((cache, temp_dir))
     }
 
     #[test]
@@ -275,63 +276,66 @@ mod tests {
     }
 
     #[test]
-    fn test_new_file_is_changed() {
-        let (cache, _temp) = create_test_cache();
+    fn test_new_file_is_changed() -> Result<()> {
+        let (cache, _temp) = create_test_cache()?;
         let fake_path = PathBuf::from("/nonexistent/file.rs");
 
         assert!(cache.is_changed(&fake_path));
+        Ok(())
     }
 
     #[test]
-    fn test_update_and_check() {
-        let (mut cache, temp) = create_test_cache();
+    fn test_update_and_check() -> Result<()> {
+        let (mut cache, temp) = create_test_cache()?;
 
         // Create a test file
         let test_file = temp.path().join("test.rs");
-        fs::write(&test_file, "fn main() {}").unwrap();
+        fs::write(&test_file, "fn main() {}")?;
 
         // Initially the file is "changed" (not in cache)
         assert!(cache.is_changed(&test_file));
 
         // Update cache
-        cache.update_file(&test_file, Vec::new()).unwrap();
+        cache.update_file(&test_file, Vec::new())?;
 
         // Now it should not be changed
         assert!(!cache.is_changed(&test_file));
+        Ok(())
     }
 
     #[test]
-    fn test_file_modification_detected() {
-        let (mut cache, temp) = create_test_cache();
+    fn test_file_modification_detected() -> Result<()> {
+        let (mut cache, temp) = create_test_cache()?;
 
         let test_file = temp.path().join("test.rs");
-        fs::write(&test_file, "fn main() {}").unwrap();
+        fs::write(&test_file, "fn main() {}")?;
 
-        cache.update_file(&test_file, Vec::new()).unwrap();
+        cache.update_file(&test_file, Vec::new())?;
         assert!(!cache.is_changed(&test_file));
 
         // Modify the file
-        fs::write(&test_file, "fn main() { println!(\"hello\"); }").unwrap();
+        fs::write(&test_file, "fn main() { println!(\"hello\"); }")?;
 
         // Should now be detected as changed
         assert!(cache.is_changed(&test_file));
+        Ok(())
     }
 
     #[test]
-    fn test_get_changed_files() {
-        let (mut cache, temp) = create_test_cache();
+    fn test_get_changed_files() -> Result<()> {
+        let (mut cache, temp) = create_test_cache()?;
 
         let file1 = temp.path().join("file1.rs");
         let file2 = temp.path().join("file2.rs");
         let file3 = temp.path().join("file3.rs");
 
-        fs::write(&file1, "content1").unwrap();
-        fs::write(&file2, "content2").unwrap();
-        fs::write(&file3, "content3").unwrap();
+        fs::write(&file1, "content1")?;
+        fs::write(&file2, "content2")?;
+        fs::write(&file3, "content3")?;
 
         // Cache file1 and file2
-        cache.update_file(&file1, Vec::new()).unwrap();
-        cache.update_file(&file2, Vec::new()).unwrap();
+        cache.update_file(&file1, Vec::new())?;
+        cache.update_file(&file2, Vec::new())?;
 
         let files = vec![file1.clone(), file2.clone(), file3.clone()];
         let (changed, stats) = cache.get_changed_files(&files);
@@ -341,14 +345,15 @@ mod tests {
         assert_eq!(changed[0], file3);
         assert_eq!(stats.files_unchanged, 2);
         assert_eq!(stats.files_new, 1);
+        Ok(())
     }
 
     #[test]
-    fn test_cached_findings() {
-        let (mut cache, temp) = create_test_cache();
+    fn test_cached_findings() -> Result<()> {
+        let (mut cache, temp) = create_test_cache()?;
 
         let test_file = temp.path().join("test.rs");
-        fs::write(&test_file, "fn main() {}").unwrap();
+        fs::write(&test_file, "fn main() {}")?;
 
         let findings = vec![CachedFinding {
             id: "test-1".to_string(),
@@ -360,10 +365,12 @@ mod tests {
             module: "sast".to_string(),
         }];
 
-        cache.update_file(&test_file, findings.clone()).unwrap();
+        cache.update_file(&test_file, findings.clone())?;
 
-        let cached = cache.get_cached_findings(&test_file);
-        assert!(cached.is_some());
-        assert_eq!(cached.unwrap().len(), 1);
+        let Some(cached) = cache.get_cached_findings(&test_file) else {
+            return Err(anyhow::anyhow!("Cached findings missing"));
+        };
+        assert_eq!(cached.len(), 1);
+        Ok(())
     }
 }

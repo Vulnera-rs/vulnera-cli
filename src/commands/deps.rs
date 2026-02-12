@@ -168,7 +168,12 @@ pub async fn run(ctx: &mut CliContext, cli: &Cli, args: &DepsArgs) -> Result<i32
         return Ok(exit_codes::SUCCESS);
     }
 
-    let manifest_name = manifest_file.clone().unwrap();
+    let Some(manifest_name) = manifest_file.clone() else {
+        ctx.output.warn("No supported package manifest found");
+        ctx.output
+            .info("Supported: package.json, Cargo.toml, requirements.txt, pom.xml, go.mod");
+        return Ok(exit_codes::SUCCESS);
+    };
     let manifest_path = path.join(&manifest_name);
 
     // Initialize manifest cache

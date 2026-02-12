@@ -217,23 +217,18 @@ pub struct CacheStats {
     pub total_size: u64,
 }
 
-impl Default for ManifestCache {
-    fn default() -> Self {
-        Self::new().expect("Failed to create manifest cache")
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use anyhow::Result;
     use tempfile::TempDir;
 
-    fn test_cache() -> (ManifestCache, TempDir) {
-        let temp_dir = TempDir::new().unwrap();
+    fn test_cache() -> Result<(ManifestCache, TempDir)> {
+        let temp_dir = TempDir::new()?;
         let cache = ManifestCache {
             cache_dir: temp_dir.path().to_path_buf(),
         };
-        (cache, temp_dir)
+        Ok((cache, temp_dir))
     }
 
     #[test]
@@ -248,38 +243,41 @@ mod tests {
     }
 
     #[test]
-    fn test_is_unchanged_no_cache() {
-        let (cache, _temp) = test_cache();
+    fn test_is_unchanged_no_cache() -> Result<()> {
+        let (cache, _temp) = test_cache()?;
         let manifest_path = Path::new("/fake/package.json");
 
         assert!(!cache.is_unchanged(manifest_path, "{}"));
+        Ok(())
     }
 
     #[test]
-    fn test_cache_file_path_consistency() {
-        let (cache, _temp) = test_cache();
+    fn test_cache_file_path_consistency() -> Result<()> {
+        let (cache, _temp) = test_cache()?;
         let manifest_path = Path::new("/project/package.json");
 
         let path1 = cache.cache_file_path(manifest_path);
         let path2 = cache.cache_file_path(manifest_path);
 
         assert_eq!(path1, path2);
+        Ok(())
     }
 
     #[test]
-    fn test_clear_cache() {
-        let (cache, _temp) = test_cache();
+    fn test_clear_cache() -> Result<()> {
+        let (cache, _temp) = test_cache()?;
 
         // Create some fake cache files
-        fs::write(cache.cache_dir.join("test1.json"), "{}").unwrap();
-        fs::write(cache.cache_dir.join("test2.json"), "{}").unwrap();
+        fs::write(cache.cache_dir.join("test1.json"), "{}")?;
+        fs::write(cache.cache_dir.join("test2.json"), "{}")?;
 
-        let stats = cache.stats().unwrap();
+        let stats = cache.stats()?;
         assert_eq!(stats.count, 2);
 
-        cache.clear().unwrap();
+        cache.clear()?;
 
-        let stats = cache.stats().unwrap();
+        let stats = cache.stats()?;
         assert_eq!(stats.count, 0);
+        Ok(())
     }
 }

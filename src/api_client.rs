@@ -554,6 +554,7 @@ impl VulneraClient {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use anyhow::Result;
 
     #[test]
     fn test_client_creation() {
@@ -562,16 +563,17 @@ mod tests {
     }
 
     #[test]
-    fn test_client_with_custom_url() {
-        let client = VulneraClient::with_url("http://localhost:8080".to_string(), None).unwrap();
+    fn test_client_with_custom_url() -> Result<()> {
+        let client = VulneraClient::with_url("http://localhost:8080".to_string(), None)?;
         assert_eq!(client.base_url, "http://localhost:8080");
+        Ok(())
     }
 
     #[test]
-    fn test_client_with_api_key() {
-        let client = VulneraClient::new("localhost".to_string(), 8080, None)
-            .unwrap()
+    fn test_client_with_api_key() -> Result<()> {
+        let client = VulneraClient::new("localhost".to_string(), 8080, None)?
             .with_api_key("test-key".to_string());
         assert_eq!(client.api_key, Some("test-key".to_string()));
+        Ok(())
     }
 }

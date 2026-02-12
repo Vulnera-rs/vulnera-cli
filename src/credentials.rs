@@ -340,50 +340,48 @@ impl CredentialManager {
     }
 }
 
-impl Default for CredentialManager {
-    fn default() -> Self {
-        Self::new().expect("Failed to create credential manager")
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use anyhow::Result;
     use tempfile::TempDir;
 
-    fn test_manager() -> (CredentialManager, TempDir) {
-        let temp_dir = TempDir::new().unwrap();
+    fn test_manager() -> Result<(CredentialManager, TempDir)> {
+        let temp_dir = TempDir::new()?;
         let manager = CredentialManager {
             data_dir: temp_dir.path().to_path_buf(),
             keyring_available: false, // Force file-based storage for tests
         };
-        (manager, temp_dir)
+        Ok((manager, temp_dir))
     }
 
     #[test]
-    fn test_store_and_retrieve() {
-        let (manager, _temp) = test_manager();
+    fn test_store_and_retrieve() -> Result<()> {
+        let (manager, _temp) = test_manager()?;
 
-        manager.store_api_key("test-key-12345").unwrap();
-        let retrieved = manager.get_api_key().unwrap();
+        manager.store_api_key("test-key-12345")?;
+        let retrieved = manager.get_api_key()?;
 
         assert_eq!(retrieved, Some("test-key-12345".to_string()));
+        Ok(())
     }
 
     #[test]
-    fn test_delete() {
-        let (manager, _temp) = test_manager();
+    fn test_delete() -> Result<()> {
+        let (manager, _temp) = test_manager()?;
 
-        manager.store_api_key("test-key").unwrap();
+        manager.store_api_key("test-key")?;
         assert!(manager.has_credentials());
 
-        manager.delete_api_key().unwrap();
+        manager.delete_api_key()?;
         assert!(!manager.has_credentials());
+        Ok(())
     }
 
     #[test]
-    fn test_no_credentials() {
-        let (manager, _temp) = test_manager();
-        assert_eq!(manager.get_api_key().unwrap(), None);
+    fn test_no_credentials() -> Result<()> {
+        let (manager, _temp) = test_manager()?;
+        assert_eq!(manager.get_api_key()?, None);
+        Ok(())
     }
 }

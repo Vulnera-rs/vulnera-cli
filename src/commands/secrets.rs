@@ -320,8 +320,13 @@ async fn run_watch_mode(
     watcher.start(|event| {
         println!("\n📝 {} file(s) changed", event.paths.len());
 
-        let rt = tokio::runtime::Runtime::new().unwrap();
-        let scan_result = rt.block_on(async { run_single_scan(ctx, cli, args, path).await });
+        let scan_result = match tokio::runtime::Runtime::new() {
+            Ok(rt) => rt.block_on(async { run_single_scan(ctx, cli, args, path).await }),
+            Err(e) => {
+                eprintln!("Failed to create runtime for scan: {}", e);
+                return true;
+            }
+        };
 
         match scan_result {
             Ok(code) => {

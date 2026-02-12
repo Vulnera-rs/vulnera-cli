@@ -148,20 +148,21 @@ impl FileWatcher {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use anyhow::Result;
     use notify_debouncer_mini::DebouncedEventKind;
     use tempfile::TempDir;
 
     #[test]
-    fn test_watcher_creation() {
-        let temp_dir = TempDir::new().unwrap();
-        let watcher = FileWatcher::new(temp_dir.path(), 500);
-        assert!(watcher.is_ok());
+    fn test_watcher_creation() -> Result<()> {
+        let temp_dir = TempDir::new()?;
+        FileWatcher::new(temp_dir.path(), 500)?;
+        Ok(())
     }
 
     #[test]
-    fn test_should_skip_hidden() {
-        let temp_dir = TempDir::new().unwrap();
-        let watcher = FileWatcher::new(temp_dir.path(), 500).unwrap();
+    fn test_should_skip_hidden() -> Result<()> {
+        let temp_dir = TempDir::new()?;
+        let watcher = FileWatcher::new(temp_dir.path(), 500)?;
 
         let hidden_event = DebouncedEvent {
             path: PathBuf::from("/project/.hidden_file.rs"),
@@ -169,12 +170,13 @@ mod tests {
         };
 
         assert!(watcher.should_process_event(&hidden_event).is_none());
+        Ok(())
     }
 
     #[test]
-    fn test_should_process_source_file() {
-        let temp_dir = TempDir::new().unwrap();
-        let watcher = FileWatcher::new(temp_dir.path(), 500).unwrap();
+    fn test_should_process_source_file() -> Result<()> {
+        let temp_dir = TempDir::new()?;
+        let watcher = FileWatcher::new(temp_dir.path(), 500)?;
 
         let source_event = DebouncedEvent {
             path: PathBuf::from("/project/src/main.rs"),
@@ -182,12 +184,13 @@ mod tests {
         };
 
         assert!(watcher.should_process_event(&source_event).is_some());
+        Ok(())
     }
 
     #[test]
-    fn test_should_skip_cache_dirs() {
-        let temp_dir = TempDir::new().unwrap();
-        let watcher = FileWatcher::new(temp_dir.path(), 500).unwrap();
+    fn test_should_skip_cache_dirs() -> Result<()> {
+        let temp_dir = TempDir::new()?;
+        let watcher = FileWatcher::new(temp_dir.path(), 500)?;
 
         let cache_event = DebouncedEvent {
             path: PathBuf::from("/project/.vulnera_cache/file.json"),
@@ -195,5 +198,6 @@ mod tests {
         };
 
         assert!(watcher.should_process_event(&cache_event).is_none());
+        Ok(())
     }
 }

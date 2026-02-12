@@ -224,9 +224,13 @@ impl QuotaTracker {
     /// Get time until quota reset (next UTC midnight)
     pub fn time_until_reset(&self) -> chrono::Duration {
         let now = Utc::now();
-        let tomorrow = (now.date_naive() + chrono::Days::new(1))
-            .and_hms_opt(0, 0, 0)
-            .expect("Valid time");
+        let tomorrow = match (now.date_naive() + chrono::Days::new(1)).and_hms_opt(0, 0, 0) {
+            Some(value) => value,
+            None => {
+                tracing::warn!("Failed to compute next UTC midnight, using current time");
+                now.naive_utc()
+            }
+        };
         let tomorrow_utc = DateTime::<Utc>::from_naive_utc_and_offset(tomorrow, Utc);
 
         tomorrow_utc.signed_duration_since(now)
@@ -312,10 +316,11 @@ impl std::fmt::Display for QuotaStatus {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use anyhow::Result;
     use tempfile::TempDir;
 
-    fn test_tracker(authenticated: bool) -> (QuotaTracker, TempDir) {
-        let temp_dir = TempDir::new().unwrap();
+    fn test_tracker(authenticated: bool) -> Result<(QuotaTracker, TempDir)> {
+        let temp_dir = TempDir::new()?;
         let quota_file = temp_dir.path().join(QUOTA_FILE_NAME);
 
         let tracker = QuotaTracker {
@@ -330,57 +335,62 @@ mod tests {
             machine_id: "test-machine".to_string(),
         };
 
-        (tracker, temp_dir)
+        Ok((tracker, temp_dir))
     }
 
     #[tokio::test]
-    async fn test_consume_quota() {
-        let (mut tracker, _temp) = test_tracker(false);
+    async fn test_consume_quota() -> Result<()> {
+        let (mut tracker, _temp) = test_tracker(false)?;
 
         // Should allow first request
-        assert!(tracker.try_consume().await.unwrap());
+        assert!(tracker.try_consume().await?);
         assert_eq!(tracker.remaining(), 9);
+        Ok(())
     }
 
     #[tokio::test]
-    async fn test_quota_limit() {
-        let (mut tracker, _temp) = test_tracker(false);
+    async fn test_quota_limit() -> Result<()> {
+        let (mut tracker, _temp) = test_tracker(false)?;
 
         // Consume all quota
         for _ in 0..UNAUTHENTICATED_DAILY_LIMIT {
-            assert!(tracker.try_consume().await.unwrap());
+            assert!(tracker.try_consume().await?);
         }
 
         // Next request should fail
-        assert!(!tracker.try_consume().await.unwrap());
+        assert!(!tracker.try_consume().await?);
         assert_eq!(tracker.remaining(), 0);
+        Ok(())
     }
 
     #[tokio::test]
-    async fn test_authenticated_limit() {
-        let (tracker, _temp) = test_tracker(true);
+    async fn test_authenticated_limit() -> Result<()> {
+        let (tracker, _temp) = test_tracker(true)?;
 
         assert_eq!(tracker.daily_limit(), AUTHENTICATED_DAILY_LIMIT);
         assert_eq!(tracker.remaining(), AUTHENTICATED_DAILY_LIMIT);
+        Ok(())
     }
 
     #[test]
-    fn test_time_until_reset() {
-        let (tracker, _temp) = test_tracker(false);
+    fn test_time_until_reset() -> Result<()> {
+        let (tracker, _temp) = test_tracker(false)?;
 
         let time = tracker.time_until_reset();
         assert!(time.num_hours() <= 24);
         assert!(time.num_hours() >= 0);
+        Ok(())
     }
 
     #[test]
-    fn test_status_display() {
-        let (tracker, _temp) = test_tracker(false);
+    fn test_status_display() -> Result<()> {
+        let (tracker, _temp) = test_tracker(false)?;
 
         let status = tracker.status();
         let display = format!("{}", status);
 
         assert!(display.contains("0/10"));
         assert!(display.contains("unauthenticated"));
+        Ok(())
     }
 }
