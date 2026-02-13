@@ -31,3 +31,20 @@ pre-commit run --all-files
 - `cargo check`
 - `cargo clippy --all-targets --all-features -- -D warnings`
 - `cargo test --test cli_tests`
+
+## Release Pipeline
+
+The CLI repository has its own release pipeline at `.github/workflows/release.yml`.
+
+- Trigger: push tag matching `v*.*.*` (for example: `v0.2.2`)
+- Artifact build script: `.github/scripts/distribute.sh`
+- Outputs per target:
+	- `vulnera-cli-<tag>-<target>.tar.gz`
+	- `vulnera-cli-<tag>-<target>.sha256`
+
+Manual local packaging:
+
+```bash
+chmod +x .github/scripts/distribute.sh
+.github/scripts/distribute.sh v0.2.2 x86_64-unknown-linux-gnu
+```

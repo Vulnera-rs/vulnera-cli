@@ -61,7 +61,8 @@ Total: 62 issues found
 - **File Watching** — `--watch` mode for continuous scanning
 - **Severity Filtering** — Report only critical/high issues
 - **Smart Caching** — Cache dependency analysis results locally
-- **Code Fixes** — AI-powered fix suggestions (with API key)
+- **Code Fixes** — AI-powered fix suggestions 
+- **Pre-commit Hooks** — Easy integration with Git hooks for automated scanning
 
 ## Installation
 
