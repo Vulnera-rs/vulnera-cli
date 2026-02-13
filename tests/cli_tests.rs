@@ -15,10 +15,11 @@ fn test_cli_help() {
 #[test]
 fn test_cli_version() {
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_vulnera"));
+    let expected = format!("vulnera {}", env!("CARGO_PKG_VERSION"));
     cmd.arg("--version")
         .assert()
         .success()
-        .stdout(predicate::str::contains("vulnera 0.2.0"));
+        .stdout(predicate::str::contains(expected));
 }
 
 #[test]
