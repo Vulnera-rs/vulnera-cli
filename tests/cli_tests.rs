@@ -173,6 +173,17 @@ fn test_config_path_subcommand() {
 }
 
 #[test]
+fn test_config_hooks_help() {
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_vulnera"));
+    cmd.arg("config")
+        .arg("hooks")
+        .arg("--help")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Install project hook"));
+}
+
+#[test]
 fn test_nonexistent_path_error() {
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_vulnera"));
     cmd.arg("analyze")

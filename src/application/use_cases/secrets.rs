@@ -3,9 +3,11 @@ use std::path::Path;
 
 use anyhow::Result;
 use uuid::Uuid;
+use vulnera_core::config::SecretDetectionConfig;
 use vulnera_core::domain::module::{AnalysisModule, ModuleConfig};
 use vulnera_secrets::module::SecretDetectionModule;
 
+use crate::application::services::scan_targets::resolve_scan_targets;
 use crate::commands::secrets::{SecretFinding, SecretsArgs, SecretsResult, SecretsSummary, SeverityCounts};
 use crate::context::CliContext;
 
@@ -13,7 +15,7 @@ pub struct ExecuteSecretsScanUseCase;
 
 impl ExecuteSecretsScanUseCase {
     pub async fn execute(
-        _ctx: &CliContext,
+        ctx: &CliContext,
         args: &SecretsArgs,
         path: &Path,
     ) -> Result<SecretsResult> {
@@ -25,18 +27,38 @@ impl ExecuteSecretsScanUseCase {
             None
         };
 
-        let secrets_module = SecretDetectionModule::new();
-        let module_config = ModuleConfig {
-            job_id: Uuid::new_v4(),
-            project_id: "cli-local".to_string(),
-            source_uri: path.to_string_lossy().to_string(),
-            config: Default::default(),
-        };
+        let mut module_cfg = ctx.config.secret_detection.clone();
+        apply_secret_overrides(&mut module_cfg, args);
+        let secrets_module = SecretDetectionModule::with_config(&module_cfg);
 
-        let res = secrets_module.execute(&module_config).await?;
+        let scan_targets = resolve_scan_targets(
+            path,
+            &ctx.working_dir,
+            &args.files,
+            args.changed_only,
+            &args.exclude,
+            None,
+        )?;
 
-        let findings: Vec<SecretFinding> = res
-            .findings
+        let mut raw_findings = Vec::new();
+        let mut files_scanned = 0usize;
+
+        match scan_targets {
+            Some(targets) => {
+                for target in targets {
+                    let res = execute_target(&secrets_module, &target).await?;
+                    files_scanned += res.metadata.files_scanned;
+                    raw_findings.extend(res.findings);
+                }
+            }
+            None => {
+                let res = execute_target(&secrets_module, path).await?;
+                files_scanned += res.metadata.files_scanned;
+                raw_findings.extend(res.findings);
+            }
+        }
+
+        let findings: Vec<SecretFinding> = raw_findings
             .into_iter()
             .map(|f| SecretFinding {
                 id: f.id,
@@ -104,16 +126,47 @@ impl ExecuteSecretsScanUseCase {
 
         Ok(SecretsResult {
             path: path.to_path_buf(),
-            files_scanned: res.metadata.files_scanned,
+            files_scanned,
             findings,
             summary: SecretsSummary {
                 total_findings: by_type.values().sum(),
                 by_type,
                 by_severity,
-                files_scanned: res.metadata.files_scanned,
+                files_scanned,
             },
         })
     }
+}
+
+async fn execute_target(
+    module: &SecretDetectionModule,
+    target: &Path,
+) -> Result<vulnera_core::domain::module::ModuleResult> {
+    let module_config = ModuleConfig {
+        job_id: Uuid::new_v4(),
+        project_id: "cli-local".to_string(),
+        source_uri: target.to_string_lossy().to_string(),
+        config: Default::default(),
+    };
+
+    Ok(module.execute(&module_config).await?)
+}
+
+fn apply_secret_overrides(config: &mut SecretDetectionConfig, args: &SecretsArgs) {
+    if !args.exclude.is_empty() {
+        config.exclude_patterns.extend(args.exclude.clone());
+    }
+
+    if !args.include_tests {
+        config.exclude_patterns.extend(vec![
+            "test".to_string(),
+            "tests".to_string(),
+            "__tests__".to_string(),
+            "spec".to_string(),
+        ]);
+    }
+
+    config.enable_entropy_detection = args.include_entropy;
 }
 
 fn redact_secret(description: &str) -> String {

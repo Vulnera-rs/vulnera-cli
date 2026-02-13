@@ -179,6 +179,18 @@ async fn run_single_scan(
         }
     };
 
+    if args.fix && !cli.quiet {
+        if cli.offline {
+            ctx.output.warn(
+                "--fix requested in offline mode: displaying module recommendations only",
+            );
+        } else {
+            ctx.output.info(
+                "--fix currently exposes built-in recommendations. Use 'vulnera generate-fix' for LLM fixes.",
+            );
+        }
+    }
+
     // Output results
     output_results(ctx, cli, args, &result, start.elapsed())
 }

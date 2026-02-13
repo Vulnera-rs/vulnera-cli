@@ -312,25 +312,25 @@ impl VulneraClient {
 
         for name in manifest_names {
             let file_path = path.join(name);
-            if file_path.exists() {
-                if let Ok(file_content) = std::fs::read_to_string(&file_path) {
-                    let ecosystem = match name {
-                        "package.json" | "package-lock.json" => "npm".to_string(),
-                        "Cargo.toml" | "Cargo.lock" => "cargo".to_string(),
-                        "requirements.txt" => "pypi".to_string(),
-                        "Pipfile" | "pyproject.toml" => "pypi".to_string(),
-                        "pom.xml" => "maven".to_string(),
-                        "build.gradle" | "build.gradle.kts" => "gradle".to_string(),
-                        "go.mod" | "go.sum" => "go".to_string(),
-                        _ => "unknown".to_string(),
-                    };
-                    files.push(DependencyFileRequest {
-                        filename: name.to_string(),
-                        file_content,
-                        ecosystem,
-                        workspace_path: Some(path.to_string_lossy().to_string()),
-                    });
-                }
+            if file_path.exists()
+                && let Ok(file_content) = std::fs::read_to_string(&file_path)
+            {
+                let ecosystem = match name {
+                    "package.json" | "package-lock.json" => "npm".to_string(),
+                    "Cargo.toml" | "Cargo.lock" => "cargo".to_string(),
+                    "requirements.txt" => "pypi".to_string(),
+                    "Pipfile" | "pyproject.toml" => "pypi".to_string(),
+                    "pom.xml" => "maven".to_string(),
+                    "build.gradle" | "build.gradle.kts" => "gradle".to_string(),
+                    "go.mod" | "go.sum" => "go".to_string(),
+                    _ => "unknown".to_string(),
+                };
+                files.push(DependencyFileRequest {
+                    filename: name.to_string(),
+                    file_content,
+                    ecosystem,
+                    workspace_path: Some(path.to_string_lossy().to_string()),
+                });
             }
         }
 

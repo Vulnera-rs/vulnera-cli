@@ -10,6 +10,9 @@ use clap::Args;
 use serde::Serialize;
 
 use crate::Cli;
+use crate::application::use_cases::generate_fix::{
+    ExecuteGenerateFixUseCase, GenerateFixExecutionOutcome,
+};
 use crate::context::CliContext;
 use crate::exit_codes;
 use crate::fix_generator::{CodeFix, FixGenerator};
@@ -51,73 +54,34 @@ pub struct GenerateFixResult {
 
 /// Run the generate-fix command
 pub async fn run(ctx: &mut CliContext, cli: &Cli, args: &GenerateFixArgs) -> Result<i32> {
-    if cli.offline {
-        ctx.output.error("Generate-fix requires online mode");
-        ctx.output
-            .info("Remove --offline or configure server access");
-        return Ok(exit_codes::NETWORK_ERROR);
-    }
-
-    if !ctx.is_authenticated() {
-        ctx.output.error("Authentication required for generate-fix");
-        ctx.output.info("Run 'vulnera auth login' to authenticate");
-        return Ok(exit_codes::AUTH_REQUIRED);
-    }
-
-    if ctx.remaining_quota() == 0 {
-        ctx.output.error("Quota exceeded");
-        ctx.output.info("Run 'vulnera quota status' for details");
-        return Ok(exit_codes::QUOTA_EXCEEDED);
-    }
-
-    if !ctx.consume_quota().await? {
-        ctx.output.error("Quota exceeded");
-        return Ok(exit_codes::QUOTA_EXCEEDED);
-    }
-
-    let file_path = if args.code.is_absolute() {
-        args.code.clone()
-    } else {
-        ctx.working_dir.join(&args.code)
-    };
-
-    if !file_path.exists() {
-        ctx.output
-            .error(&format!("File does not exist: {:?}", file_path));
-        return Ok(exit_codes::CONFIG_ERROR);
-    }
-
-    let description = args
-        .description
-        .clone()
-        .unwrap_or_else(|| args.vulnerability.clone());
-
-    let client = match ctx.api_client() {
-        Some(client) => client.clone(),
-        None => {
+    let result = match ExecuteGenerateFixUseCase::execute(ctx, args, cli.offline).await? {
+        GenerateFixExecutionOutcome::Success(result) => result,
+        GenerateFixExecutionOutcome::OfflineMode => {
+            ctx.output.error("Generate-fix requires online mode");
+            ctx.output
+                .info("Remove --offline or configure server access");
+            return Ok(exit_codes::NETWORK_ERROR);
+        }
+        GenerateFixExecutionOutcome::AuthenticationRequired => {
+            ctx.output.error("Authentication required for generate-fix");
+            ctx.output.info("Run 'vulnera auth login' to authenticate");
+            return Ok(exit_codes::AUTH_REQUIRED);
+        }
+        GenerateFixExecutionOutcome::QuotaExceeded => {
+            ctx.output.error("Quota exceeded");
+            ctx.output.info("Run 'vulnera quota status' for details");
+            return Ok(exit_codes::QUOTA_EXCEEDED);
+        }
+        GenerateFixExecutionOutcome::MissingFile(file_path) => {
+            ctx.output
+                .error(&format!("File does not exist: {:?}", file_path));
+            return Ok(exit_codes::CONFIG_ERROR);
+        }
+        GenerateFixExecutionOutcome::MissingApiClient => {
             ctx.output
                 .error("API client not configured for generate-fix");
             return Ok(exit_codes::NETWORK_ERROR);
         }
-    };
-
-    let generator = FixGenerator::new(client);
-    let fix = generator
-        .generate_fix_with_language(
-            &args.vulnerability,
-            &description,
-            &file_path,
-            args.line,
-            args.language.as_deref(),
-        )
-        .await?;
-
-    let result = GenerateFixResult {
-        vulnerability_id: args.vulnerability.clone(),
-        file: file_path.to_string_lossy().to_string(),
-        line: args.line,
-        description,
-        fix: fix.clone(),
     };
 
     match ctx.output.format() {
@@ -128,7 +92,7 @@ pub async fn run(ctx: &mut CliContext, cli: &Cli, args: &GenerateFixArgs) -> Res
             print_sarif(&result)?;
         }
         OutputFormat::Table | OutputFormat::Plain => {
-            if let Some(fix) = fix {
+            if let Some(fix) = result.fix.clone() {
                 ctx.output.success("Fix generated");
                 ctx.output
                     .print(&format!("Vulnerability: {}", result.vulnerability_id));
