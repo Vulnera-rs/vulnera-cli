@@ -4,4 +4,4 @@ set -euo pipefail
 cargo fmt --all --check
 cargo check
 cargo clippy --all-targets --all-features -- -D warnings
-cargo test --test cli_tests
+cargo test --lib --tests
