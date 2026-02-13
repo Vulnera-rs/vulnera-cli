@@ -3,9 +3,10 @@
 //! View and modify CLI configuration.
 
 use std::path::PathBuf;
+use std::process::Command;
 
 use anyhow::Result;
-use clap::{Args, Subcommand};
+use clap::{Args, Subcommand, ValueEnum};
 use directories::ProjectDirs;
 use serde::Serialize;
 
@@ -35,6 +36,71 @@ pub enum ConfigCommand {
     Reset,
     /// Initialize a new configuration file
     Init(InitArgs),
+    /// Manage project pre-commit hooks for vulnera scans
+    Hooks(HooksArgs),
+}
+
+#[derive(Args, Debug)]
+pub struct HooksArgs {
+    #[command(subcommand)]
+    pub command: HooksCommand,
+}
+
+#[derive(Subcommand, Debug)]
+pub enum HooksCommand {
+    /// Install project hook(s)
+    Install(InstallHooksArgs),
+    /// Show hook status in current project
+    Status(HookStatusArgs),
+    /// Remove project hook(s)
+    Remove(RemoveHooksArgs),
+}
+
+#[derive(Args, Debug)]
+pub struct InstallHooksArgs {
+    /// Project path (defaults to current directory)
+    #[arg(default_value = ".")]
+    pub path: PathBuf,
+
+    /// Hook backend: native git hook or pre-commit framework
+    #[arg(long, value_enum, default_value = "git")]
+    pub backend: HookBackend,
+
+    /// Include dependency scanning (online). Disabled by default for fast local hooks.
+    #[arg(long)]
+    pub with_deps: bool,
+
+    /// Minimum severity gate for the hook
+    #[arg(long, default_value = "high")]
+    pub min_severity: String,
+
+    /// Overwrite existing managed hook block
+    #[arg(long)]
+    pub force: bool,
+}
+
+#[derive(Args, Debug)]
+pub struct HookStatusArgs {
+    /// Project path (defaults to current directory)
+    #[arg(default_value = ".")]
+    pub path: PathBuf,
+}
+
+#[derive(Args, Debug)]
+pub struct RemoveHooksArgs {
+    /// Project path (defaults to current directory)
+    #[arg(default_value = ".")]
+    pub path: PathBuf,
+
+    /// Hook backend to remove
+    #[arg(long, value_enum, default_value = "git")]
+    pub backend: HookBackend,
+}
+
+#[derive(Clone, Copy, Debug, ValueEnum)]
+pub enum HookBackend {
+    Git,
+    PreCommit,
 }
 
 #[derive(Args, Debug)]
@@ -78,6 +144,15 @@ pub async fn run(ctx: &CliContext, cli: &Cli, args: &ConfigArgs) -> Result<i32> 
         ConfigCommand::Get(get_args) => get_config(ctx, cli, get_args).await,
         ConfigCommand::Reset => reset_config(ctx, cli).await,
         ConfigCommand::Init(init_args) => init_config(ctx, cli, init_args).await,
+        ConfigCommand::Hooks(hook_args) => hooks(ctx, cli, hook_args).await,
+    }
+}
+
+async fn hooks(ctx: &CliContext, _cli: &Cli, args: &HooksArgs) -> Result<i32> {
+    match &args.command {
+        HooksCommand::Install(install) => install_hooks(ctx, install).await,
+        HooksCommand::Status(status) => hook_status(ctx, status).await,
+        HooksCommand::Remove(remove) => remove_hooks(ctx, remove).await,
     }
 }
 
@@ -408,4 +483,236 @@ fn set_nested_value(root: &mut toml::Value, parts: &[&str], value: &str) -> Resu
     table.insert(parts[parts.len() - 1].to_string(), parsed_value);
 
     Ok(())
+}
+
+const HOOK_BEGIN: &str = "# >>> vulnera hook start";
+const HOOK_END: &str = "# <<< vulnera hook end";
+
+async fn install_hooks(ctx: &CliContext, args: &InstallHooksArgs) -> Result<i32> {
+    let project_path = resolve_project_path(&ctx.working_dir, &args.path);
+    if !project_path.exists() {
+        ctx.output
+            .error(&format!("Project path does not exist: {:?}", project_path));
+        return Ok(exit_codes::CONFIG_ERROR);
+    }
+
+    match args.backend {
+        HookBackend::Git => install_git_hook(ctx, &project_path, args),
+        HookBackend::PreCommit => install_precommit_hook(ctx, &project_path, args),
+    }
+}
+
+fn install_git_hook(ctx: &CliContext, project_path: &PathBuf, args: &InstallHooksArgs) -> Result<i32> {
+    let Some(repo_root) = find_git_root(project_path) else {
+        ctx.output.error("Not inside a git repository");
+        return Ok(exit_codes::CONFIG_ERROR);
+    };
+
+    let hook_path = repo_root.join(".git").join("hooks").join("pre-commit");
+    let existing = std::fs::read_to_string(&hook_path).unwrap_or_default();
+
+    if existing.contains(HOOK_BEGIN) && !args.force {
+        ctx.output
+            .info("Vulnera git hook is already installed (use --force to replace)");
+        return Ok(exit_codes::SUCCESS);
+    }
+
+    let command = build_hook_command(args);
+    let managed_block = format!(
+        "{HOOK_BEGIN}\nif ! command -v vulnera >/dev/null 2>&1; then\n  echo \"vulnera CLI not found in PATH\"\n  exit 1\nfi\nif ! {command}; then\n  HOOK_STATUS=$?\n  echo \"Vulnera hook blocked commit (exit $HOOK_STATUS)\"\n  exit $HOOK_STATUS\nfi\n{HOOK_END}\n"
+    );
+
+    let new_content = if existing.trim().is_empty() {
+        format!("#!/usr/bin/env bash\nset -euo pipefail\n\n{managed_block}")
+    } else {
+        let stripped = strip_managed_block(&existing);
+        format!("{}\n{}", stripped.trim_end(), managed_block)
+    };
+
+    if let Some(parent) = hook_path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    std::fs::write(&hook_path, new_content)?;
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let perms = std::fs::Permissions::from_mode(0o755);
+        std::fs::set_permissions(&hook_path, perms)?;
+    }
+
+    ctx.output.success("Installed git pre-commit hook");
+    ctx.output
+        .info(&format!("Hook path: {:?}", hook_path));
+    Ok(exit_codes::SUCCESS)
+}
+
+fn install_precommit_hook(
+    ctx: &CliContext,
+    project_path: &PathBuf,
+    args: &InstallHooksArgs,
+) -> Result<i32> {
+    let config_path = project_path.join(".pre-commit-config.yaml");
+    let existing = std::fs::read_to_string(&config_path).unwrap_or_default();
+
+    if existing.contains("id: vulnera-scan") && !args.force {
+        ctx.output
+            .info("Vulnera pre-commit hook is already present (use --force to replace)");
+        return Ok(exit_codes::SUCCESS);
+    }
+
+    let command = build_hook_command(args);
+    let block = format!(
+        "{HOOK_BEGIN}\nrepos:\n  - repo: local\n    hooks:\n      - id: vulnera-scan\n        name: vulnera scan\n        entry: {command}\n        language: system\n        pass_filenames: false\n{HOOK_END}\n"
+    );
+
+    let new_content = if existing.trim().is_empty() {
+        block
+    } else {
+        let stripped = strip_managed_block(&existing);
+        format!("{}\n\n{}", stripped.trim_end(), block)
+    };
+
+    std::fs::write(&config_path, new_content)?;
+
+    ctx.output
+        .success("Updated .pre-commit-config.yaml with vulnera hook");
+    ctx.output.info(
+        "Run 'pre-commit install' in this project to enable the hook",
+    );
+    Ok(exit_codes::SUCCESS)
+}
+
+async fn hook_status(ctx: &CliContext, args: &HookStatusArgs) -> Result<i32> {
+    let project_path = resolve_project_path(&ctx.working_dir, &args.path);
+    let repo_root = find_git_root(&project_path);
+
+    let git_hook_status = repo_root
+        .as_ref()
+        .map(|root| root.join(".git").join("hooks").join("pre-commit"))
+        .filter(|p| p.exists())
+        .and_then(|p| std::fs::read_to_string(p).ok())
+        .is_some_and(|content| content.contains(HOOK_BEGIN));
+
+    let precommit_cfg = project_path.join(".pre-commit-config.yaml");
+    let precommit_status = precommit_cfg.exists()
+        && std::fs::read_to_string(precommit_cfg)
+            .ok()
+            .is_some_and(|content| content.contains("id: vulnera-scan"));
+
+    ctx.output.header("Vulnera Hook Status");
+    ctx.output.print(&format!(
+        "Git pre-commit hook: {}",
+        if git_hook_status {
+            "installed"
+        } else {
+            "not installed"
+        }
+    ));
+    ctx.output.print(&format!(
+        "pre-commit config: {}",
+        if precommit_status {
+            "installed"
+        } else {
+            "not installed"
+        }
+    ));
+
+    Ok(exit_codes::SUCCESS)
+}
+
+async fn remove_hooks(ctx: &CliContext, args: &RemoveHooksArgs) -> Result<i32> {
+    let project_path = resolve_project_path(&ctx.working_dir, &args.path);
+
+    match args.backend {
+        HookBackend::Git => {
+            let Some(repo_root) = find_git_root(&project_path) else {
+                ctx.output.error("Not inside a git repository");
+                return Ok(exit_codes::CONFIG_ERROR);
+            };
+
+            let hook_path = repo_root.join(".git").join("hooks").join("pre-commit");
+            if !hook_path.exists() {
+                ctx.output.info("Git pre-commit hook not found");
+                return Ok(exit_codes::SUCCESS);
+            }
+
+            let existing = std::fs::read_to_string(&hook_path)?;
+            let stripped = strip_managed_block(&existing);
+            if stripped.trim().is_empty() {
+                std::fs::remove_file(&hook_path)?;
+            } else {
+                std::fs::write(&hook_path, stripped)?;
+            }
+
+            ctx.output.success("Removed vulnera git hook block");
+        }
+        HookBackend::PreCommit => {
+            let config_path = project_path.join(".pre-commit-config.yaml");
+            if !config_path.exists() {
+                ctx.output.info(".pre-commit-config.yaml not found");
+                return Ok(exit_codes::SUCCESS);
+            }
+
+            let existing = std::fs::read_to_string(&config_path)?;
+            let stripped = strip_managed_block(&existing);
+            std::fs::write(&config_path, stripped)?;
+
+            ctx.output
+                .success("Removed vulnera block from .pre-commit-config.yaml");
+        }
+    }
+
+    Ok(exit_codes::SUCCESS)
+}
+
+fn build_hook_command(args: &InstallHooksArgs) -> String {
+    let offline_flag = if args.with_deps { "" } else { " --offline" };
+    format!(
+        "vulnera analyze . --ci --quiet --changed-only --min-severity {} --fail-on-vuln{}",
+        args.min_severity, offline_flag
+    )
+}
+
+fn strip_managed_block(content: &str) -> String {
+    if let (Some(start), Some(end)) = (content.find(HOOK_BEGIN), content.find(HOOK_END)) {
+        let end_idx = end + HOOK_END.len();
+        let mut output = String::new();
+        output.push_str(&content[..start]);
+        if end_idx < content.len() {
+            output.push_str(&content[end_idx..]);
+        }
+        output
+    } else {
+        content.to_string()
+    }
+}
+
+fn resolve_project_path(working_dir: &PathBuf, path: &PathBuf) -> PathBuf {
+    if path.is_absolute() {
+        path.clone()
+    } else {
+        working_dir.join(path)
+    }
+}
+
+fn find_git_root(path: &PathBuf) -> Option<PathBuf> {
+    let output = Command::new("git")
+        .arg("-C")
+        .arg(path)
+        .arg("rev-parse")
+        .arg("--show-toplevel")
+        .output()
+        .ok()?;
+
+    if !output.status.success() {
+        return None;
+    }
+
+    let root = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if root.is_empty() {
+        None
+    } else {
+        Some(PathBuf::from(root))
+    }
 }

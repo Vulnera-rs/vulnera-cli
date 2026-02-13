@@ -343,6 +343,20 @@ Manage configuration.
 vulnera config show             Display current configuration
 vulnera config init             Initialize config file
 vulnera config set <KEY> <VAL>  Set configuration value
+vulnera config hooks install    Install project hook integration
+vulnera config hooks status     Show hook installation status
+vulnera config hooks remove     Remove installed vulnera hook block
+```
+
+Install a project hook quickly:
+
+```bash
+# Native git hook (default backend)
+vulnera config hooks install
+
+# pre-commit framework backend
+vulnera config hooks install --backend pre-commit
+pre-commit install
 ```
 
 ## Configuration
