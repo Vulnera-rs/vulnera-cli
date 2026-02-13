@@ -716,6 +716,28 @@ cargo clippy
 cargo fmt --check
 ```
 
+### Developer Ergonomics (Hooks)
+
+Use one of the following hook setups to catch issues before pushing:
+
+```bash
+# Option A: Python pre-commit framework
+pipx install pre-commit
+pre-commit install
+pre-commit run --all-files
+
+# Option B: Native git hook (no Python dependency)
+chmod +x .githooks/pre-commit
+git config core.hooksPath .githooks
+```
+
+Both hook setups run:
+
+- `cargo fmt --all --check`
+- `cargo check`
+- `cargo clippy --all-targets --all-features -- -D warnings`
+- `cargo test --test cli_tests`
+
 ### Running Tests
 
 ```bash
