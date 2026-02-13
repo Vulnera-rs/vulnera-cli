@@ -8,15 +8,14 @@ use std::path::PathBuf;
 use anyhow::Result;
 use clap::Args;
 use serde::Serialize;
-use uuid::Uuid;
-use vulnera_core::domain::module::{AnalysisModule, ModuleConfig};
-use vulnera_sast::module::SastModule;
 
 use crate::Cli;
+use crate::application::exit_policy;
+use crate::application::services::watch_runner;
+use crate::application::use_cases::sast::ExecuteSastScanUseCase;
 use crate::context::CliContext;
 use crate::exit_codes;
 use crate::output::{OutputFormat, ProgressIndicator, VulnerabilityDisplay};
-use crate::severity::{parse_severity, severity_meets_minimum};
 
 /// Arguments for the sast command
 #[derive(Args, Debug)]
@@ -154,24 +153,12 @@ async fn run_single_scan(
     args: &SastArgs,
     path: &PathBuf,
 ) -> Result<i32> {
-    use crate::file_cache::{CachedFinding, FileCache};
-
     let start = std::time::Instant::now();
 
     if !cli.quiet {
         ctx.output.header("Static Analysis (SAST)");
         ctx.output.info(&format!("Scanning: {:?}", path));
     }
-
-    // Initialize file cache unless --no-cache
-    let mut file_cache = if !args.no_cache {
-        FileCache::new(path).ok()
-    } else {
-        if cli.verbose {
-            ctx.output.info("Cache disabled (--no-cache)");
-        }
-        None
-    };
 
     // Create progress indicator
     let progress = if !cli.quiet && !cli.ci {
@@ -180,117 +167,12 @@ async fn run_single_scan(
         None
     };
 
-    // Parse minimum severity
-    let min_severity = parse_severity(&args.min_severity);
-
-    // Run SAST analysis using embedded module
-    let sast_module = SastModule::new();
-    let module_config = ModuleConfig {
-        job_id: Uuid::new_v4(),
-        project_id: "cli-local".to_string(),
-        source_uri: path.to_string_lossy().to_string(),
-        config: Default::default(),
-    };
-
-    let module_result = sast_module.execute(&module_config).await;
-
     if let Some(p) = &progress {
         p.finish_and_clear();
     }
 
-    let result = match module_result {
-        Ok(res) => {
-            // Convert module findings to CLI findings
-            let findings: Vec<SastFinding> = res
-                .findings
-                .into_iter()
-                .filter(|f| severity_meets_minimum(&f.severity, &min_severity))
-                .map(|f| SastFinding {
-                    id: f.id,
-                    rule_id: f.rule_id.unwrap_or_else(|| "unknown".to_string()),
-                    severity: format!("{:?}", f.severity).to_lowercase(),
-                    category: "SAST".to_string(),
-                    message: f.description.clone(),
-                    file: f.location.path.clone(),
-                    line: f.location.line.unwrap_or(0),
-                    column: f.location.column,
-                    end_line: f.location.end_line,
-                    snippet: None,
-                    fix_suggestion: f.recommendation,
-                    cwe: None,
-                    owasp: None,
-                })
-                .collect();
-
-            // Update file cache with findings
-            if let Some(ref mut cache) = file_cache {
-                // Group findings by file and update cache
-                let mut findings_by_file: std::collections::HashMap<String, Vec<CachedFinding>> =
-                    std::collections::HashMap::new();
-
-                for finding in &findings {
-                    let cached = CachedFinding {
-                        id: finding.id.clone(),
-                        rule_id: Some(finding.rule_id.clone()),
-                        severity: finding.severity.clone(),
-                        description: finding.message.clone(),
-                        line: Some(finding.line),
-                        column: finding.column,
-                        module: "sast".to_string(),
-                    };
-                    findings_by_file
-                        .entry(finding.file.clone())
-                        .or_default()
-                        .push(cached);
-                }
-
-                // Update cache for each scanned file
-                for (file, file_findings) in findings_by_file {
-                    let file_path = std::path::Path::new(&file);
-                    if file_path.exists() {
-                        let _ = cache.update_file(file_path, file_findings);
-                    }
-                }
-
-                // Save cache
-                if let Err(e) = cache.save() {
-                    if cli.verbose {
-                        ctx.output.warn(&format!("Failed to save cache: {}", e));
-                    }
-                } else if cli.verbose {
-                    ctx.output
-                        .info(&format!("Cache updated ({} entries)", cache.len()));
-                }
-            }
-
-            let mut summary = SastSummary {
-                total_findings: findings.len(),
-                critical: 0,
-                high: 0,
-                medium: 0,
-                low: 0,
-                files_scanned: res.metadata.files_scanned,
-                lines_scanned: 0,
-            };
-
-            for finding in &findings {
-                match finding.severity.as_str() {
-                    "critical" => summary.critical += 1,
-                    "high" => summary.high += 1,
-                    "medium" => summary.medium += 1,
-                    "low" => summary.low += 1,
-                    _ => {}
-                }
-            }
-
-            SastResult {
-                path: path.clone(),
-                files_scanned: res.metadata.files_scanned,
-                languages_detected: Vec::new(),
-                findings,
-                summary,
-            }
-        }
+    let result = match ExecuteSastScanUseCase::execute(ctx, args, path).await {
+        Ok(result) => result,
         Err(e) => {
             ctx.output.error(&format!("SAST analysis failed: {}", e));
             return Ok(exit_codes::INTERNAL_ERROR);
@@ -330,19 +212,11 @@ async fn run_watch_mode(
     watcher.start(|event| {
         println!("\n📝 {} file(s) changed", event.paths.len());
 
-        // Create a new runtime for the async scan
-        let rt = match tokio::runtime::Runtime::new() {
-            Ok(runtime) => runtime,
-            Err(error) => {
-                eprintln!("Failed to create async runtime: {}", error);
-                return true;
-            }
-        };
-        let scan_result = rt.block_on(async { run_single_scan(ctx, cli, args, path).await });
+        let scan_result = watch_runner::run_scan(run_single_scan(ctx, cli, args, path));
 
         match scan_result {
             Ok(code) => {
-                if code == exit_codes::VULNERABILITIES_FOUND {
+                if exit_policy::is_findings_exit(code) {
                     println!("⚠ Vulnerabilities detected");
                 }
             }
@@ -402,9 +276,8 @@ fn output_results(
     }
 
     // Determine exit code
-    if args.fail_on_vuln && !result.findings.is_empty() {
-        Ok(exit_codes::VULNERABILITIES_FOUND)
-    } else {
-        Ok(exit_codes::SUCCESS)
-    }
+    Ok(exit_policy::findings_exit_code(
+        args.fail_on_vuln,
+        !result.findings.is_empty(),
+    ))
 }

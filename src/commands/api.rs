@@ -14,6 +14,7 @@ use vulnera_api::module::ApiSecurityModule;
 use vulnera_core::domain::module::{AnalysisModule, ModuleConfig};
 
 use crate::Cli;
+use crate::application::exit_policy;
 use crate::context::CliContext;
 use crate::exit_codes;
 use crate::output::{OutputFormat, ProgressIndicator, VulnerabilityDisplay};
@@ -285,11 +286,10 @@ pub async fn run(ctx: &CliContext, cli: &Cli, args: &ApiArgs) -> Result<i32> {
     }
 
     // Determine exit code
-    if args.fail_on_issue && !result.findings.is_empty() {
-        Ok(exit_codes::VULNERABILITIES_FOUND)
-    } else {
-        Ok(exit_codes::SUCCESS)
-    }
+    Ok(exit_policy::findings_exit_code(
+        args.fail_on_issue,
+        !result.findings.is_empty(),
+    ))
 }
 
 /// Extract endpoint from description (best effort)

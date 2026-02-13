@@ -7,6 +7,9 @@ use clap::{Args, Subcommand};
 use serde::Serialize;
 
 use crate::Cli;
+use crate::application::use_cases::quota::{
+    QuotaServerStatus, ShowQuotaUseCase, SyncQuotaUseCase,
+};
 use crate::context::CliContext;
 use crate::exit_codes;
 use crate::output::OutputFormat;
@@ -54,7 +57,8 @@ pub async fn run(ctx: &mut CliContext, cli: &Cli, args: &QuotaArgs) -> Result<i3
 
 /// Show current quota status
 async fn show_quota(ctx: &CliContext, cli: &Cli) -> Result<i32> {
-    let status = ctx.quota.status();
+    let outcome = ShowQuotaUseCase::execute(ctx, cli.offline).await?;
+    let status = outcome.status;
 
     let info = QuotaInfo {
         used: status.used,
@@ -106,32 +110,22 @@ async fn show_quota(ctx: &CliContext, cli: &Cli) -> Result<i32> {
                 ctx.output.print(&format!("Last sync: {}", sync_time));
             }
 
-            // Check server connectivity if not offline
-            if !cli.offline {
-                let api_key = ctx.credentials.get_api_key().ok().flatten();
-                match crate::api_client::VulneraClient::new(
-                    ctx.config.server.host.clone(),
-                    ctx.config.server.port,
-                    api_key.clone(),
-                ) {
-                    Ok(client) => match client.get_quota().await {
-                        Ok(server_quota) => {
-                            ctx.output.success("Connected to Vulnera server");
-                            if server_quota.used != status.used {
-                                ctx.output.warn(&format!(
-                                    "Server shows {}/{} used - run 'vulnera quota sync' to update",
-                                    server_quota.used, server_quota.limit
-                                ));
-                            }
-                        }
-                        Err(_) => {
-                            ctx.output.warn("Could not fetch server quota");
-                        }
-                    },
-                    Err(_) => {
-                        ctx.output.warn("Offline - using local quota only");
+            match outcome.server_status {
+                QuotaServerStatus::Connected(server_quota) => {
+                    ctx.output.success("Connected to Vulnera server");
+                    if server_quota.used != status.used {
+                        ctx.output.warn(&format!(
+                            "Server shows {}/{} used - run 'vulnera quota sync' to update",
+                            server_quota.used, server_quota.limit
+                        ));
                     }
                 }
+                QuotaServerStatus::Unreachable => {
+                    if !cli.offline {
+                        ctx.output.warn("Could not fetch server quota");
+                    }
+                }
+                QuotaServerStatus::Offline => {}
             }
         }
     }
@@ -141,34 +135,25 @@ async fn show_quota(ctx: &CliContext, cli: &Cli) -> Result<i32> {
 
 /// Sync quota with remote server
 async fn sync_quota(ctx: &mut CliContext, cli: &Cli) -> Result<i32> {
-    if cli.offline {
-        ctx.output.error("Cannot sync quota in offline mode");
-        return Ok(exit_codes::NETWORK_ERROR);
-    }
-
     ctx.output.info("Syncing quota with server...");
 
-    let api_key = ctx.credentials.get_api_key().ok().flatten();
-    let client = crate::api_client::VulneraClient::new(
-        ctx.config.server.host.clone(),
-        ctx.config.server.port,
-        api_key,
-    )?;
-
-    match client.get_quota().await {
-        Ok(server_quota) => {
-            ctx.quota
-                .apply_server_quota(server_quota.used, server_quota.limit)?;
+    match SyncQuotaUseCase::execute(ctx, cli.offline).await {
+        Ok(outcome) => {
             ctx.output.success("Quota synced successfully");
             ctx.output.print(&format!(
                 "Server quota: {}/{} ({} remaining)",
-                server_quota.used,
-                server_quota.limit,
-                server_quota.limit - server_quota.used
+                outcome.used,
+                outcome.limit,
+                outcome.limit - outcome.used
             ));
         }
         Err(e) => {
-            ctx.output.error(&format!("Failed to sync quota: {}", e));
+            let error_text = e.to_string();
+            if error_text.contains("offline mode") {
+                ctx.output.error("Cannot sync quota in offline mode");
+            } else {
+                ctx.output.error(&format!("Failed to sync quota: {}", error_text));
+            }
             return Ok(exit_codes::NETWORK_ERROR);
         }
     }

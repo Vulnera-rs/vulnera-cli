@@ -7,6 +7,9 @@ use clap::{Args, Subcommand};
 use serde::Serialize;
 
 use crate::Cli;
+use crate::application::use_cases::auth::{
+    LoginUseCase, LoginVerificationStatus, LogoutUseCase, StatusUseCase,
+};
 use crate::context::CliContext;
 use crate::exit_codes;
 use crate::output::{self, OutputFormat};
@@ -103,61 +106,60 @@ async fn login(ctx: &CliContext, cli: &Cli, args: &LoginArgs) -> Result<i32> {
             .info("Master keys are supported but should be treated as development-only");
     }
 
-    // Store the API key
+    // Store and verify API key via use case
     ctx.output.info("Storing API key securely...");
 
-    if let Err(e) = ctx.credentials.store_api_key(&api_key) {
-        ctx.output.error(&format!("Failed to store API key: {}", e));
-        ctx.output.info(&format!(
-            "Storage method: {}",
-            ctx.credentials.storage_method()
-        ));
-        return Ok(exit_codes::INTERNAL_ERROR);
-    }
+    let server_url = args
+        .server
+        .clone()
+        .unwrap_or_else(|| ctx.server_url.clone());
 
-    ctx.output.success("Successfully logged in!");
-    ctx.output.info(&format!(
-        "Credentials stored using: {}",
-        ctx.credentials.storage_method()
-    ));
-    ctx.output.info("You now have 40 requests per day");
+    match LoginUseCase::execute(ctx, cli.offline, server_url.clone(), api_key).await {
+        Ok(outcome) => {
+            ctx.output.success("Successfully logged in!");
+            ctx.output.info(&format!(
+                "Credentials stored using: {}",
+                outcome.storage_method
+            ));
+            ctx.output.info("You now have 40 requests per day");
 
-    // Verify the key with the server if not offline
-    if !cli.offline {
-        ctx.output.info("Verifying API key with server...");
-
-        let server_url = args
-            .server
-            .clone()
-            .unwrap_or_else(|| ctx.server_url.clone());
-
-        let client =
-            crate::api_client::VulneraClient::with_url(server_url.clone(), Some(api_key.clone()))?;
-
-        match client.verify_api_key().await {
-            Ok(true) => {
-                ctx.output.success("API key verified");
+            match outcome.verification {
+                LoginVerificationStatus::Verified => {
+                    ctx.output.info("Verifying API key with server...");
+                    ctx.output.success("API key verified");
+                }
+                LoginVerificationStatus::Invalid => {
+                    ctx.output.info("Verifying API key with server...");
+                    ctx.output
+                        .warn("API key could not be verified - it may be invalid");
+                    ctx.output
+                        .info("The key has been stored, but you may need to check it");
+                }
+                LoginVerificationStatus::Unreachable(error_text) => {
+                    ctx.output.info("Verifying API key with server...");
+                    ctx.output
+                        .warn(&format!("Could not verify API key: {}", error_text));
+                    ctx.output.info("Possible reasons:");
+                    ctx.output
+                        .info("  1. Server is not reachable at the configured URL");
+                    ctx.output
+                        .info(&format!("  2. Current server: {}", server_url));
+                    ctx.output
+                        .info("  3. Set VULNERA_SERVER_URL to connect to a different server");
+                    ctx.output
+                        .info("  4. Run 'vulnera auth login --help' to see options");
+                    ctx.output.info("The key has been stored for offline use");
+                }
+                LoginVerificationStatus::SkippedOffline => {}
             }
-            Ok(false) => {
-                ctx.output
-                    .warn("API key could not be verified - it may be invalid");
-                ctx.output
-                    .info("The key has been stored, but you may need to check it");
-            }
-            Err(e) => {
-                ctx.output.warn(&format!("Could not verify API key: {}", e));
-                ctx.output.info("Possible reasons:");
-                ctx.output
-                    .info("  1. Server is not reachable at the configured URL");
-                ctx.output
-                    .info(&format!("  2. Current server: {}", server_url));
-                ctx.output
-                    .info("  3. Set VULNERA_SERVER_URL to connect to a different server");
-                ctx.output
-                    .info("  4. Run 'vulnera auth login --help' to see options");
-                ctx.output.info(&format!("Original error: {}", e));
-                ctx.output.info("The key has been stored for offline use");
-            }
+        }
+        Err(e) => {
+            ctx.output.error(&format!("Failed to store API key: {}", e));
+            ctx.output.info(&format!(
+                "Storage method: {}",
+                ctx.credentials.storage_method()
+            ));
+            return Ok(exit_codes::INTERNAL_ERROR);
         }
     }
 
@@ -180,7 +182,7 @@ async fn logout(ctx: &CliContext, cli: &Cli) -> Result<i32> {
         }
     }
 
-    if let Err(e) = ctx.credentials.delete_api_key() {
+    if let Err(e) = LogoutUseCase::execute(ctx) {
         ctx.output
             .error(&format!("Failed to remove credentials: {}", e));
         return Ok(exit_codes::INTERNAL_ERROR);
@@ -194,13 +196,13 @@ async fn logout(ctx: &CliContext, cli: &Cli) -> Result<i32> {
 
 /// Show authentication status
 async fn status(ctx: &CliContext, cli: &Cli) -> Result<i32> {
-    let authenticated = ctx.credentials.has_credentials();
+    let outcome = StatusUseCase::execute(ctx, cli.offline).await?;
 
     let status = AuthStatus {
-        authenticated,
-        storage_method: ctx.credentials.storage_method().to_string(),
-        server_url: ctx.server_url.clone(),
-        quota_limit: if authenticated { 40 } else { 10 },
+        authenticated: outcome.authenticated,
+        storage_method: outcome.storage_method,
+        server_url: outcome.server_url,
+        quota_limit: outcome.quota_limit,
     };
 
     match ctx.output.format() {
@@ -210,7 +212,7 @@ async fn status(ctx: &CliContext, cli: &Cli) -> Result<i32> {
         OutputFormat::Table | OutputFormat::Plain | OutputFormat::Sarif => {
             ctx.output.header("Authentication Status");
 
-            if authenticated {
+            if status.authenticated {
                 ctx.output.success("Authenticated");
                 ctx.output
                     .print(&format!("Daily limit: {} requests", status.quota_limit));
@@ -225,15 +227,11 @@ async fn status(ctx: &CliContext, cli: &Cli) -> Result<i32> {
                 .print(&format!("Storage: {}", status.storage_method));
             ctx.output.print(&format!("Server: {}", status.server_url));
 
-            // Check server connectivity if not offline
-            if !cli.offline {
-                let api_key = ctx.credentials.get_api_key().ok().flatten();
-                let client =
-                    crate::api_client::VulneraClient::with_url(ctx.server_url.clone(), api_key)?;
-
-                match client.health_check().await {
-                    Ok(true) => ctx.output.success("Server connection: OK"),
-                    Ok(false) | Err(_) => ctx.output.warn("Server connection: Failed"),
+            if let Some(connected) = outcome.server_connected {
+                if connected {
+                    ctx.output.success("Server connection: OK");
+                } else {
+                    ctx.output.warn("Server connection: Failed");
                 }
             }
         }

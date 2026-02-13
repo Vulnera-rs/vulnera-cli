@@ -10,11 +10,11 @@ use std::path::PathBuf;
 use anyhow::Result;
 use clap::Args;
 use serde::Serialize;
-use uuid::Uuid;
-use vulnera_core::domain::module::{AnalysisModule, ModuleConfig};
-use vulnera_secrets::module::SecretDetectionModule;
 
 use crate::Cli;
+use crate::application::exit_policy;
+use crate::application::services::watch_runner;
+use crate::application::use_cases::secrets::ExecuteSecretsScanUseCase;
 use crate::context::CliContext;
 use crate::exit_codes;
 use crate::output::{OutputFormat, ProgressIndicator, VulnerabilityDisplay};
@@ -149,24 +149,12 @@ async fn run_single_scan(
     args: &SecretsArgs,
     path: &PathBuf,
 ) -> Result<i32> {
-    use crate::file_cache::{CachedFinding, FileCache};
-
     let start = std::time::Instant::now();
 
     if !cli.quiet {
         ctx.output.header("Secret Detection");
         ctx.output.info(&format!("Scanning: {:?}", path));
     }
-
-    // Initialize file cache unless --no-cache
-    let mut file_cache = if !args.no_cache {
-        FileCache::new(path).ok()
-    } else {
-        if cli.verbose {
-            ctx.output.info("Cache disabled (--no-cache)");
-        }
-        None
-    };
 
     // Create progress indicator
     let progress = if !cli.quiet && !cli.ci {
@@ -175,112 +163,12 @@ async fn run_single_scan(
         None
     };
 
-    // Run secrets detection using embedded module
-    let secrets_module = SecretDetectionModule::new();
-    let module_config = ModuleConfig {
-        job_id: Uuid::new_v4(),
-        project_id: "cli-local".to_string(),
-        source_uri: path.to_string_lossy().to_string(),
-        config: Default::default(),
-    };
-
-    let module_result = secrets_module.execute(&module_config).await;
-
     if let Some(p) = &progress {
         p.finish_and_clear();
     }
 
-    let result = match module_result {
-        Ok(res) => {
-            // Convert module findings to CLI findings
-            let findings: Vec<SecretFinding> = res
-                .findings
-                .into_iter()
-                .map(|f| SecretFinding {
-                    id: f.id,
-                    secret_type: f.rule_id.unwrap_or_else(|| "unknown".to_string()),
-                    severity: format!("{:?}", f.severity).to_lowercase(),
-                    file: f.location.path.clone(),
-                    line: f.location.line.unwrap_or(0),
-                    column: f.location.column,
-                    match_text: String::new(), // Redacted for security
-                    redacted_value: redact_secret(&f.description),
-                    description: f.description,
-                    remediation: f.recommendation.unwrap_or_else(|| {
-                        "Remove the secret and rotate credentials immediately".to_string()
-                    }),
-                })
-                .collect();
-
-            // Update file cache with findings
-            if let Some(ref mut cache) = file_cache {
-                let mut findings_by_file: std::collections::HashMap<String, Vec<CachedFinding>> =
-                    std::collections::HashMap::new();
-
-                for finding in &findings {
-                    let cached = CachedFinding {
-                        id: finding.id.clone(),
-                        rule_id: Some(finding.secret_type.clone()),
-                        severity: finding.severity.clone(),
-                        description: finding.description.clone(),
-                        line: Some(finding.line),
-                        column: finding.column,
-                        module: "secrets".to_string(),
-                    };
-                    findings_by_file
-                        .entry(finding.file.clone())
-                        .or_default()
-                        .push(cached);
-                }
-
-                for (file, file_findings) in findings_by_file {
-                    let file_path = std::path::Path::new(&file);
-                    if file_path.exists() {
-                        let _ = cache.update_file(file_path, file_findings);
-                    }
-                }
-
-                if let Err(e) = cache.save() {
-                    if cli.verbose {
-                        ctx.output.warn(&format!("Failed to save cache: {}", e));
-                    }
-                } else if cli.verbose {
-                    ctx.output
-                        .info(&format!("Cache updated ({} entries)", cache.len()));
-                }
-            }
-
-            let mut by_type: HashMap<String, usize> = HashMap::new();
-            let mut by_severity = SeverityCounts {
-                critical: 0,
-                high: 0,
-                medium: 0,
-                low: 0,
-            };
-
-            for finding in &findings {
-                *by_type.entry(finding.secret_type.clone()).or_insert(0) += 1;
-                match finding.severity.as_str() {
-                    "critical" => by_severity.critical += 1,
-                    "high" => by_severity.high += 1,
-                    "medium" => by_severity.medium += 1,
-                    "low" => by_severity.low += 1,
-                    _ => {}
-                }
-            }
-
-            SecretsResult {
-                path: path.clone(),
-                files_scanned: res.metadata.files_scanned,
-                findings,
-                summary: SecretsSummary {
-                    total_findings: by_type.values().sum(),
-                    by_type,
-                    by_severity,
-                    files_scanned: res.metadata.files_scanned,
-                },
-            }
-        }
+    let result = match ExecuteSecretsScanUseCase::execute(ctx, args, path).await {
+        Ok(result) => result,
         Err(e) => {
             ctx.output.error(&format!("Secret detection failed: {}", e));
             return Ok(exit_codes::INTERNAL_ERROR);
@@ -320,17 +208,11 @@ async fn run_watch_mode(
     watcher.start(|event| {
         println!("\n📝 {} file(s) changed", event.paths.len());
 
-        let scan_result = match tokio::runtime::Runtime::new() {
-            Ok(rt) => rt.block_on(async { run_single_scan(ctx, cli, args, path).await }),
-            Err(e) => {
-                eprintln!("Failed to create runtime for scan: {}", e);
-                return true;
-            }
-        };
+        let scan_result = watch_runner::run_scan(run_single_scan(ctx, cli, args, path));
 
         match scan_result {
             Ok(code) => {
-                if code == exit_codes::VULNERABILITIES_FOUND {
+                if exit_policy::is_findings_exit(code) {
                     println!("⚠ Secrets detected");
                 }
             }
@@ -402,23 +284,9 @@ fn output_results(
     }
 
     // Determine exit code
-    if args.fail_on_secret && !result.findings.is_empty() {
-        Ok(exit_codes::VULNERABILITIES_FOUND)
-    } else {
-        Ok(exit_codes::SUCCESS)
-    }
+    Ok(exit_policy::findings_exit_code(
+        args.fail_on_secret,
+        !result.findings.is_empty(),
+    ))
 }
 
-/// Redact a secret value for safe display
-fn redact_secret(description: &str) -> String {
-    // If description contains what looks like a secret, redact it
-    if description.len() > 20 {
-        let prefix = &description[..8];
-        let suffix = &description[description.len() - 4..];
-        format!("{}...{}", prefix, suffix)
-    } else if description.len() > 8 {
-        format!("{}...", &description[..4])
-    } else {
-        "[REDACTED]".to_string()
-    }
-}

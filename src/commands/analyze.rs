@@ -8,17 +8,20 @@
 //!
 //! In offline mode, runs all offline modules and skips deps with a warning.
 
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 use anyhow::Result;
 use clap::Args;
 use serde::Serialize;
 
 use crate::Cli;
+use crate::application::exit_policy;
+use crate::application::use_cases::analyze::{
+    DepsRunStatus, ExecuteAnalyzeUseCase,
+};
 use crate::context::CliContext;
 use crate::exit_codes;
 use crate::output::{OutputFormat, ProgressIndicator, VulnerabilityDisplay};
-use crate::severity::severity_meets_minimum_str;
 
 /// Arguments for the analyze command
 #[derive(Args, Debug)]
@@ -115,14 +118,6 @@ pub struct AnalysisSummary {
     pub duration_ms: u64,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum DepsRunStatus {
-    Ran,
-    Skipped,
-    Failed,
-    QuotaExceeded,
-}
-
 /// Run the analyze command
 pub async fn run(ctx: &mut CliContext, cli: &Cli, args: &AnalyzeArgs) -> Result<i32> {
     let start = std::time::Instant::now();
@@ -158,79 +153,17 @@ pub async fn run(ctx: &mut CliContext, cli: &Cli, args: &AnalyzeArgs) -> Result<
         None
     };
 
-    let mut result = AnalysisResult {
-        path: path.clone(),
-        vulnerabilities: Vec::new(),
-        summary: AnalysisSummary {
-            total: 0,
-            critical: 0,
-            high: 0,
-            medium: 0,
-            low: 0,
-            files_scanned: 0,
-            duration_ms: 0,
-        },
-        modules_run: Vec::new(),
-        warnings: Vec::new(),
-    };
-    let mut quota_exceeded = false;
-
-    // Run SAST analysis (works offline)
-    if !args.skip_sast {
-        if let Some(p) = &progress {
-            p.set_message("Running static analysis (SAST)...");
-        }
-
-        run_sast_analysis(ctx, &path, &mut result).await;
-        result.modules_run.push("sast".to_string());
+    if let Some(p) = &progress {
+        p.set_message("Running analysis modules...");
     }
 
-    // Run secret detection (works offline)
-    if !args.skip_secrets {
-        if let Some(p) = &progress {
-            p.set_message("Detecting secrets...");
-        }
+    let execution = ExecuteAnalyzeUseCase::execute(ctx, args, &path, cli.offline).await;
+    let mut result = execution.result;
+    let quota_exceeded = execution.deps_status == DepsRunStatus::QuotaExceeded;
 
-        run_secrets_analysis(ctx, &path, &mut result).await;
-        result.modules_run.push("secrets".to_string());
-    }
-
-    // Run API analysis (works offline)
-    if !args.skip_api {
-        if let Some(p) = &progress {
-            p.set_message("Analyzing API endpoints...");
-        }
-
-        run_api_analysis(ctx, &path, &mut result).await;
-        result.modules_run.push("api".to_string());
-    }
-
-    // Run dependency analysis (requires server)
-    if !args.skip_deps {
-        if cli.offline {
-            // Skip deps in offline mode with warning
-            result
-                .warnings
-                .push("Dependency analysis skipped (requires server connection)".to_string());
-            if !cli.quiet {
-                ctx.output
-                    .warn("Dependency analysis skipped (requires server connection)");
-            }
-        } else {
-            if let Some(p) = &progress {
-                p.set_message("Scanning dependencies (requires server)...");
-            }
-
-            match run_deps_analysis(ctx, &path, &mut result, &args.min_severity).await {
-                DepsRunStatus::Ran => {
-                    result.modules_run.push("deps".to_string());
-                }
-                DepsRunStatus::QuotaExceeded => {
-                    quota_exceeded = true;
-                }
-                DepsRunStatus::Skipped | DepsRunStatus::Failed => {}
-            }
-        }
+    if cli.offline && !args.skip_deps && !cli.quiet {
+        ctx.output
+            .warn("Dependency analysis skipped (requires server connection)");
     }
 
     if let Some(p) = progress {
@@ -297,177 +230,11 @@ pub async fn run(ctx: &mut CliContext, cli: &Cli, args: &AnalyzeArgs) -> Result<
     }
 
     // Determine exit code
-    if quota_exceeded {
-        Ok(exit_codes::QUOTA_EXCEEDED)
-    } else if args.fail_on_vuln && !result.vulnerabilities.is_empty() {
-        Ok(exit_codes::VULNERABILITIES_FOUND)
-    } else {
-        Ok(exit_codes::SUCCESS)
-    }
-}
-
-/// Run SAST analysis
-async fn run_sast_analysis(ctx: &CliContext, path: &Path, result: &mut AnalysisResult) {
-    match ctx.executor.run_sast(path).await {
-        Ok(res) => {
-            result.summary.files_scanned += res.files_scanned;
-
-            for finding in res.findings {
-                result.vulnerabilities.push(VulnerabilityInfo {
-                    id: finding.rule_id.unwrap_or_else(|| finding.id.clone()),
-                    severity: finding.severity,
-                    package: finding.file.clone(),
-                    version: finding.line.map(|l| format!("L{}", l)).unwrap_or_default(),
-                    description: finding.description,
-                    module: finding.module,
-                    file: Some(finding.file),
-                    line: finding.line,
-                    fix_available: finding.recommendation.is_some(),
-                    fixed_version: None,
-                });
-            }
-        }
-        Err(e) => {
-            result.warnings.push(format!("SAST analysis failed: {}", e));
-        }
-    }
-}
-
-/// Run secrets analysis
-async fn run_secrets_analysis(ctx: &CliContext, path: &Path, result: &mut AnalysisResult) {
-    match ctx.executor.run_secrets(path).await {
-        Ok(res) => {
-            result.summary.files_scanned += res.files_scanned;
-
-            for finding in res.findings {
-                result.vulnerabilities.push(VulnerabilityInfo {
-                    id: finding.rule_id.unwrap_or_else(|| finding.id.clone()),
-                    severity: finding.severity,
-                    package: finding.file.clone(),
-                    version: finding.line.map(|l| format!("L{}", l)).unwrap_or_default(),
-                    description: finding.description,
-                    module: finding.module,
-                    file: Some(finding.file),
-                    line: finding.line,
-                    fix_available: finding.recommendation.is_some(),
-                    fixed_version: None,
-                });
-            }
-        }
-        Err(e) => {
-            result
-                .warnings
-                .push(format!("Secret detection failed: {}", e));
-        }
-    }
-}
-
-/// Run API analysis
-async fn run_api_analysis(ctx: &CliContext, path: &Path, result: &mut AnalysisResult) {
-    match ctx.executor.run_api(path).await {
-        Ok(res) => {
-            for finding in res.findings {
-                result.vulnerabilities.push(VulnerabilityInfo {
-                    id: finding.rule_id.unwrap_or_else(|| finding.id.clone()),
-                    severity: finding.severity,
-                    package: finding.file.clone(),
-                    version: finding.line.map(|l| format!("L{}", l)).unwrap_or_default(),
-                    description: finding.description,
-                    module: finding.module,
-                    file: Some(finding.file),
-                    line: finding.line,
-                    fix_available: finding.recommendation.is_some(),
-                    fixed_version: None,
-                });
-            }
-        }
-        Err(e) => {
-            // Check if it's just "no spec found" vs actual error
-            let err_msg = e.to_string();
-            if !err_msg.contains("No OpenAPI specification found") {
-                result
-                    .warnings
-                    .push(format!("API security analysis failed: {}", e));
-            }
-        }
-    }
-}
-
-/// Run deps analysis (requires server)
-async fn run_deps_analysis(
-    ctx: &mut CliContext,
-    path: &Path,
-    result: &mut AnalysisResult,
-    min_severity: &str,
-) -> DepsRunStatus {
-    // Use the executor's already-configured API client if available
-    if !ctx.executor.has_api_client() {
-        result
-            .warnings
-            .push("Dependency analysis requires server connection".to_string());
-        return DepsRunStatus::Skipped;
-    }
-
-    let client = match ctx.executor.get_api_client().cloned() {
-        Some(c) => c,
-        None => {
-            result
-                .warnings
-                .push("API client not available for dependency analysis".to_string());
-            return DepsRunStatus::Skipped;
-        }
-    };
-
-    if ctx.remaining_quota() == 0 {
-        result
-            .warnings
-            .push("Quota exceeded - dependency analysis skipped".to_string());
-        return DepsRunStatus::QuotaExceeded;
-    }
-
-    match ctx.consume_quota().await {
-        Ok(true) => {}
-        Ok(false) => {
-            result
-                .warnings
-                .push("Quota exceeded - dependency analysis skipped".to_string());
-            return DepsRunStatus::QuotaExceeded;
-        }
-        Err(e) => {
-            result
-                .warnings
-                .push(format!("Failed to consume quota: {}", e));
-            return DepsRunStatus::Failed;
-        }
-    }
-
-    match client.analyze_dependencies(path, None, false).await {
-        Ok(response) => {
-            for vuln in response.vulnerabilities {
-                if severity_meets_minimum_str(&vuln.severity, min_severity) {
-                    result.vulnerabilities.push(VulnerabilityInfo {
-                        id: vuln.cve.unwrap_or(vuln.id),
-                        severity: vuln.severity,
-                        package: vuln.package.clone(),
-                        version: vuln.version,
-                        description: vuln.description,
-                        module: "deps".to_string(),
-                        file: None,
-                        line: None,
-                        fix_available: vuln.fixed_version.is_some(),
-                        fixed_version: vuln.fixed_version,
-                    });
-                }
-            }
-            DepsRunStatus::Ran
-        }
-        Err(e) => {
-            result
-                .warnings
-                .push(format!("Dependency analysis failed: {}", e));
-            DepsRunStatus::Failed
-        }
-    }
+    Ok(exit_policy::analyze_exit_code(
+        quota_exceeded,
+        args.fail_on_vuln,
+        !result.vulnerabilities.is_empty(),
+    ))
 }
 
 #[cfg(test)]

@@ -16,11 +16,13 @@ use clap::Args;
 use serde::Serialize;
 
 use crate::Cli;
-use crate::api_client::VulneraClient;
+use crate::application::exit_policy;
+use crate::application::use_cases::deps::ExecuteDepsScanUseCase;
 use crate::context::CliContext;
 use crate::exit_codes;
 use crate::manifest_cache::{CachedDepsResult, ManifestCache};
 use crate::output::{OutputFormat, ProgressIndicator, VulnerabilityDisplay};
+use crate::severity::severity_meets_minimum_str;
 
 /// Arguments for the deps command
 #[derive(Args, Debug)]
@@ -184,42 +186,33 @@ pub async fn run(ctx: &mut CliContext, cli: &Cli, args: &DepsArgs) -> Result<i32
 
     // Check cache unless --force-rescan is specified
     if !args.force_rescan {
-        if let Some(ref cache) = cache {
-            if let Ok(Some(cached_entry)) =
+        if let Some(ref cache) = cache
+            && let Ok(Some(cached_entry)) =
                 cache.get_if_unchanged(&manifest_path, &manifest_content)
-            {
-                // Cache hit - return cached result
-                if cli.verbose {
-                    ctx.output.info(&format!(
-                        "Using cached result (cached at {})",
-                        chrono::DateTime::from_timestamp(cached_entry.cached_at, 0)
-                            .map(|dt| dt.format("%Y-%m-%d %H:%M:%S").to_string())
-                            .unwrap_or_else(|| "unknown".to_string())
-                    ));
-                }
-
-                let result = convert_cached_result(
-                    &cached_entry.result,
-                    &path,
-                    manifest_file.clone(),
-                    package_manager.clone(),
-                    &args.min_severity,
-                );
-
-                return output_result(ctx, cli, args, &result, start.elapsed(), true);
+        {
+            // Cache hit - return cached result
+            if cli.verbose {
+                ctx.output.info(&format!(
+                    "Using cached result (cached at {})",
+                    chrono::DateTime::from_timestamp(cached_entry.cached_at, 0)
+                        .map(|dt| dt.format("%Y-%m-%d %H:%M:%S").to_string())
+                        .unwrap_or_else(|| "unknown".to_string())
+                ));
             }
+
+            let result = convert_cached_result(
+                &cached_entry.result,
+                &path,
+                manifest_file.clone(),
+                package_manager.clone(),
+                &args.min_severity,
+            );
+
+            return output_result(ctx, cli, args, &result, start.elapsed(), true);
         }
     } else if cli.verbose {
         ctx.output.info("Cache bypassed (--force-rescan)");
     }
-
-    // Create API client
-    let api_key = ctx.credentials.get_api_key().ok().flatten();
-    let client = VulneraClient::new(
-        ctx.config.server.host.clone(),
-        ctx.config.server.port,
-        api_key,
-    )?;
 
     // Check connectivity
     if !cli.quiet {
@@ -233,27 +226,19 @@ pub async fn run(ctx: &mut CliContext, cli: &Cli, args: &DepsArgs) -> Result<i32
         None
     };
 
-    if let Some(p) = &progress {
-        if let Some(pm) = &package_manager {
-            p.set_message(&format!("Found {} project, analyzing...", pm));
-        }
+    if let Some(p) = &progress
+        && let Some(pm) = &package_manager
+    {
+        p.set_message(&format!("Found {} project, analyzing...", pm));
     }
 
-    if ctx.remaining_quota() == 0 {
-        ctx.output.error("Quota exceeded");
-        ctx.output.info("Run 'vulnera quota status' for details");
-        return Ok(exit_codes::QUOTA_EXCEEDED);
-    }
-
-    if !ctx.consume_quota().await? {
-        ctx.output.error("Quota exceeded");
-        return Ok(exit_codes::QUOTA_EXCEEDED);
-    }
-
-    // Call server API
-    let api_result = client
-        .analyze_dependencies(&path, package_manager.as_deref(), args.include_transitive)
-        .await;
+    let api_result = ExecuteDepsScanUseCase::execute(
+        ctx,
+        &path,
+        package_manager.as_deref(),
+        args.include_transitive,
+    )
+    .await;
 
     if let Some(p) = &progress {
         p.finish_and_clear();
@@ -265,7 +250,7 @@ pub async fn run(ctx: &mut CliContext, cli: &Cli, args: &DepsArgs) -> Result<i32
             let vulnerabilities: Vec<DepsVulnerability> = response
                 .vulnerabilities
                 .into_iter()
-                .filter(|v| severity_meets_minimum(&v.severity, &args.min_severity))
+                .filter(|v| severity_meets_minimum_str(&v.severity, &args.min_severity))
                 .map(|v| DepsVulnerability {
                     id: v.id,
                     severity: v.severity,
@@ -328,17 +313,24 @@ pub async fn run(ctx: &mut CliContext, cli: &Cli, args: &DepsArgs) -> Result<i32
             }
         }
         Err(e) => {
+            let error_text = e.to_string();
+            if error_text.contains("Quota exceeded") {
+                ctx.output.error("Quota exceeded");
+                ctx.output.info("Run 'vulnera quota status' for details");
+                return Ok(exit_codes::QUOTA_EXCEEDED);
+            }
+
             ctx.output
-                .error(&format!("Dependency analysis failed: {}", e));
+                .error(&format!("Dependency analysis failed: {}", error_text));
 
             // Provide helpful hints
-            if e.to_string().contains("401") || e.to_string().contains("unauthorized") {
+            if error_text.contains("401") || error_text.contains("unauthorized") {
                 ctx.output
                     .info("Authentication required. Run 'vulnera auth login'");
-            } else if e.to_string().contains("429") {
+            } else if error_text.contains("429") {
                 ctx.output
                     .info("Rate limit exceeded. Please wait or upgrade your plan");
-            } else if e.to_string().contains("connection") || e.to_string().contains("network") {
+            } else if error_text.contains("connection") || error_text.contains("network") {
                 ctx.output
                     .info("Check your network connection and server URL");
             }
@@ -390,19 +382,6 @@ fn detect_package_manager(path: &Path) -> (Option<String>, Option<String>) {
     (None, None)
 }
 
-/// Check if severity meets minimum threshold
-fn severity_meets_minimum(severity: &str, minimum: &str) -> bool {
-    let severity_order = |s: &str| match s.to_lowercase().as_str() {
-        "critical" => 4,
-        "high" => 3,
-        "medium" => 2,
-        "low" => 1,
-        _ => 0,
-    };
-
-    severity_order(severity) >= severity_order(minimum)
-}
-
 /// Convert cached result back to DepsResult
 fn convert_cached_result(
     cached: &CachedDepsResult,
@@ -414,7 +393,7 @@ fn convert_cached_result(
     let vulnerabilities: Vec<DepsVulnerability> = cached
         .vulnerabilities
         .iter()
-        .filter(|v| severity_meets_minimum(&v.severity, min_severity))
+        .filter(|v| severity_meets_minimum_str(&v.severity, min_severity))
         .map(|v| DepsVulnerability {
             id: v.id.clone(),
             severity: v.severity.clone(),
@@ -535,9 +514,8 @@ fn output_result(
     }
 
     // Determine exit code
-    if args.fail_on_vuln && !result.vulnerabilities.is_empty() {
-        Ok(exit_codes::VULNERABILITIES_FOUND)
-    } else {
-        Ok(exit_codes::SUCCESS)
-    }
+    Ok(exit_policy::findings_exit_code(
+        args.fail_on_vuln,
+        !result.vulnerabilities.is_empty(),
+    ))
 }
