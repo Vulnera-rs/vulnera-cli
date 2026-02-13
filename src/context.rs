@@ -6,7 +6,7 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, anyhow};
 use vulnera_core::config::Config;
 
 use crate::Cli;
@@ -77,11 +77,7 @@ impl CliContext {
 
         // Create API client if not offline (use resolved server URL)
         let api_client = if !cli.offline {
-            let mut client = VulneraClient::with_url(server_url.clone(), None)?;
-            if let Some(key) = &api_key {
-                client = client.with_api_key(key.clone());
-            }
-            Some(client)
+            Some(Self::build_api_client(&server_url, api_key.clone())?)
         } else {
             None
         };
@@ -175,6 +171,31 @@ impl CliContext {
         !self.offline_mode
     }
 
+    /// Create an API client from current context state
+    ///
+    /// This is the single construction path for command modules that need
+    /// on-demand server communication.
+    pub fn create_api_client(&self) -> Result<VulneraClient> {
+        if self.offline_mode {
+            return Err(anyhow!("Cannot create API client in offline mode"));
+        }
+
+        let api_key = self.resolve_current_api_key()?;
+        Self::build_api_client(&self.server_url, api_key)
+    }
+
+    /// Create an API client for a specific server URL and optional API key.
+    ///
+    /// This is used by auth flows that verify credentials against a user-
+    /// supplied server without mutating global CLI context.
+    pub fn create_api_client_for_server(
+        &self,
+        server_url: &str,
+        api_key: Option<String>,
+    ) -> Result<VulneraClient> {
+        Self::build_api_client(server_url, api_key)
+    }
+
     /// Get the API client (returns None if offline)
     pub fn api_client(&self) -> Option<&VulneraClient> {
         self.api_client.as_ref()
@@ -193,6 +214,14 @@ impl CliContext {
     /// Get daily quota limit
     pub fn daily_limit(&self) -> u32 {
         self.quota.daily_limit()
+    }
+
+    fn build_api_client(server_url: &str, api_key: Option<String>) -> Result<VulneraClient> {
+        let mut client = VulneraClient::with_url(server_url.to_string(), None)?;
+        if let Some(key) = api_key {
+            client = client.with_api_key(key);
+        }
+        Ok(client)
     }
 }
 
