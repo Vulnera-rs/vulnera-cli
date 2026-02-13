@@ -184,6 +184,42 @@ fn test_config_hooks_help() {
 }
 
 #[test]
+fn test_config_hooks_install_help() {
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_vulnera"));
+    cmd.arg("config")
+        .arg("hooks")
+        .arg("install")
+        .arg("--help")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Hook backend"));
+}
+
+#[test]
+fn test_config_hooks_status_help() {
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_vulnera"));
+    cmd.arg("config")
+        .arg("hooks")
+        .arg("status")
+        .arg("--help")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Project path"));
+}
+
+#[test]
+fn test_config_hooks_remove_help() {
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_vulnera"));
+    cmd.arg("config")
+        .arg("hooks")
+        .arg("remove")
+        .arg("--help")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Hook backend"));
+}
+
+#[test]
 fn test_nonexistent_path_error() {
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_vulnera"));
     cmd.arg("analyze")
