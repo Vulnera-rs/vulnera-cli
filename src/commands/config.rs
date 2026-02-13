@@ -3,6 +3,7 @@
 //! View and modify CLI configuration.
 
 use std::path::PathBuf;
+use std::path::Path;
 use std::process::Command;
 
 use anyhow::Result;
@@ -502,7 +503,7 @@ async fn install_hooks(ctx: &CliContext, args: &InstallHooksArgs) -> Result<i32>
     }
 }
 
-fn install_git_hook(ctx: &CliContext, project_path: &PathBuf, args: &InstallHooksArgs) -> Result<i32> {
+fn install_git_hook(ctx: &CliContext, project_path: &Path, args: &InstallHooksArgs) -> Result<i32> {
     let Some(repo_root) = find_git_root(project_path) else {
         ctx.output.error("Not inside a git repository");
         return Ok(exit_codes::CONFIG_ERROR);
@@ -549,7 +550,7 @@ fn install_git_hook(ctx: &CliContext, project_path: &PathBuf, args: &InstallHook
 
 fn install_precommit_hook(
     ctx: &CliContext,
-    project_path: &PathBuf,
+    project_path: &Path,
     args: &InstallHooksArgs,
 ) -> Result<i32> {
     let config_path = project_path.join(".pre-commit-config.yaml");
@@ -688,15 +689,15 @@ fn strip_managed_block(content: &str) -> String {
     }
 }
 
-fn resolve_project_path(working_dir: &PathBuf, path: &PathBuf) -> PathBuf {
+fn resolve_project_path(working_dir: &Path, path: &Path) -> PathBuf {
     if path.is_absolute() {
-        path.clone()
+        path.to_path_buf()
     } else {
         working_dir.join(path)
     }
 }
 
-fn find_git_root(path: &PathBuf) -> Option<PathBuf> {
+fn find_git_root(path: &Path) -> Option<PathBuf> {
     let output = Command::new("git")
         .arg("-C")
         .arg(path)

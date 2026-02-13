@@ -8,13 +8,18 @@ use std::path::PathBuf;
 use anyhow::Result;
 use clap::Args;
 use serde::Serialize;
+use serde_json::json;
 
 use crate::Cli;
 use crate::application::exit_policy;
 use crate::application::services::watch_runner;
 use crate::application::use_cases::sast::ExecuteSastScanUseCase;
+use crate::application::use_cases::sast_fix::{
+    ExecuteSastBulkFixUseCase, SastFixExecutionOutcome,
+};
 use crate::context::CliContext;
 use crate::exit_codes;
+use crate::fix_generator::FixGenerator;
 use crate::output::{OutputFormat, ProgressIndicator, VulnerabilityDisplay};
 
 /// Arguments for the sast command
@@ -60,7 +65,7 @@ pub struct SastArgs {
     #[arg(long)]
     pub watch: bool,
 
-    /// Generate LLM-powered fix suggestions (requires online mode, SARIF output)
+    /// Generate LLM-powered bulk fixes and remediation suggestions
     #[arg(long)]
     pub fix: bool,
 }
@@ -73,6 +78,46 @@ pub struct SastResult {
     pub languages_detected: Vec<String>,
     pub findings: Vec<SastFinding>,
     pub summary: SastSummary,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub remediation: Option<SastFixReport>,
+}
+
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct SastFixReport {
+    pub llm_fixes: Vec<SastGeneratedFix>,
+    pub failed_fixes: Vec<String>,
+    pub sast_suggestions: Vec<SastFixSuggestion>,
+    pub deps_suggestions: Vec<SastDepsSuggestion>,
+    pub warnings: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct SastGeneratedFix {
+    pub finding_id: String,
+    pub rule_id: String,
+    pub file: String,
+    pub line: u32,
+    pub explanation: String,
+    pub suggested_code: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct SastFixSuggestion {
+    pub finding_id: String,
+    pub rule_id: String,
+    pub file: String,
+    pub line: u32,
+    pub suggestion: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct SastDepsSuggestion {
+    pub vulnerability_id: String,
+    pub package: String,
+    pub current_version: String,
+    pub suggested_version: String,
+    pub severity: String,
+    pub suggestion: String,
 }
 
 /// Individual SAST finding
@@ -171,7 +216,7 @@ async fn run_single_scan(
         p.finish_and_clear();
     }
 
-    let result = match ExecuteSastScanUseCase::execute(ctx, args, path).await {
+    let mut result = match ExecuteSastScanUseCase::execute(ctx, args, path).await {
         Ok(result) => result,
         Err(e) => {
             ctx.output.error(&format!("SAST analysis failed: {}", e));
@@ -179,15 +224,41 @@ async fn run_single_scan(
         }
     };
 
-    if args.fix && !cli.quiet {
-        if cli.offline {
-            ctx.output.warn(
-                "--fix requested in offline mode: displaying module recommendations only",
-            );
-        } else {
-            ctx.output.info(
-                "--fix currently exposes built-in recommendations. Use 'vulnera generate-fix' for LLM fixes.",
-            );
+    if args.fix {
+        match ExecuteSastBulkFixUseCase::execute(ctx, path, &result.findings, cli.offline).await? {
+            SastFixExecutionOutcome::Success(report) => {
+                if !cli.quiet {
+                    ctx.output.success(&format!(
+                        "Generated {} LLM fix(es); {} SAST suggestion(s); {} dependency suggestion(s)",
+                        report.llm_fixes.len(),
+                        report.sast_suggestions.len(),
+                        report.deps_suggestions.len()
+                    ));
+                }
+                result.remediation = Some(report);
+            }
+            SastFixExecutionOutcome::OfflineMode(report) => {
+                if !cli.quiet {
+                    ctx.output.warn("--fix in offline mode: using local SAST suggestions only");
+                }
+                result.remediation = Some(report);
+            }
+            SastFixExecutionOutcome::AuthenticationRequired(report) => {
+                if !cli.quiet {
+                    ctx.output.warn("--fix requires authentication for LLM generation");
+                    ctx.output.info("Run 'vulnera auth login' to enable bulk LLM fixes");
+                }
+                result.remediation = Some(report);
+            }
+            SastFixExecutionOutcome::QuotaExceeded(report) => {
+                result.remediation = Some(report);
+            }
+            SastFixExecutionOutcome::MissingApiClient(report) => {
+                if !cli.quiet {
+                    ctx.output.warn("API client unavailable for LLM fix generation");
+                }
+                result.remediation = Some(report);
+            }
         }
     }
 
@@ -256,8 +327,12 @@ fn output_results(
             ctx.output.json(result)?;
         }
         OutputFormat::Sarif => {
-            ctx.output
-                .sarif(&result.findings, "vulnera-sast", "1.0.0")?;
+            if let Some(remediation) = &result.remediation {
+                print_sarif_with_fixes(result, remediation)?;
+            } else {
+                ctx.output
+                    .sarif(&result.findings, "vulnera-sast", "1.0.0")?;
+            }
         }
         OutputFormat::Table | OutputFormat::Plain => {
             if result.findings.is_empty() {
@@ -283,6 +358,51 @@ fn output_results(
                     result.files_scanned,
                     duration.as_secs_f64()
                 ));
+
+                if let Some(remediation) = &result.remediation {
+                    if !remediation.llm_fixes.is_empty() {
+                        ctx.output.print("\nLLM Fixes:");
+                        for generated in remediation.llm_fixes.iter().take(5) {
+                            ctx.output.print(&format!(
+                                "- {}:{} [{}] {}",
+                                generated.file,
+                                generated.line,
+                                generated.rule_id,
+                                generated.explanation
+                            ));
+                        }
+                    }
+
+                    if !remediation.sast_suggestions.is_empty() {
+                        ctx.output.print("\nSAST Suggestions:");
+                        for suggestion in remediation.sast_suggestions.iter().take(5) {
+                            ctx.output.print(&format!(
+                                "- {}:{} [{}] {}",
+                                suggestion.file,
+                                suggestion.line,
+                                suggestion.rule_id,
+                                suggestion.suggestion
+                            ));
+                        }
+                    }
+
+                    if !remediation.deps_suggestions.is_empty() {
+                        ctx.output.print("\nDependency Suggestions:");
+                        for suggestion in remediation.deps_suggestions.iter().take(5) {
+                            ctx.output.print(&format!(
+                                "- {} {} -> {} ({})",
+                                suggestion.package,
+                                suggestion.current_version,
+                                suggestion.suggested_version,
+                                suggestion.severity
+                            ));
+                        }
+                    }
+
+                    for warning in &remediation.warnings {
+                        ctx.output.warn(warning);
+                    }
+                }
             }
         }
     }
@@ -292,4 +412,79 @@ fn output_results(
         args.fail_on_vuln,
         !result.findings.is_empty(),
     ))
+}
+
+fn print_sarif_with_fixes(result: &SastResult, remediation: &SastFixReport) -> Result<()> {
+    let fixes_by_finding: std::collections::HashMap<&str, &SastGeneratedFix> = remediation
+        .llm_fixes
+        .iter()
+        .map(|fix| (fix.finding_id.as_str(), fix))
+        .collect();
+
+    let sarif_results: Vec<serde_json::Value> = result
+        .findings
+        .iter()
+        .enumerate()
+        .map(|(idx, finding)| {
+            let mut entry = json!({
+                "ruleId": finding.rule_id,
+                "level": match finding.severity.to_lowercase().as_str() {
+                    "critical" | "high" => "error",
+                    "medium" => "warning",
+                    _ => "note"
+                },
+                "message": {
+                    "text": finding.message
+                },
+                "locations": [{
+                    "physicalLocation": {
+                        "artifactLocation": {
+                            "uri": finding.file
+                        },
+                        "region": {
+                            "startLine": finding.line.max(1)
+                        }
+                    }
+                }],
+                "partialFingerprints": {
+                    "primaryLocationLineHash": format!("{}_{}", finding.id, idx)
+                }
+            });
+
+            if let Some(generated) = fixes_by_finding.get(finding.id.as_str()) {
+                let fix = crate::fix_generator::CodeFix {
+                    finding_id: generated.finding_id.clone(),
+                    original_code: String::new(),
+                    suggested_code: generated.suggested_code.clone(),
+                    explanation: generated.explanation.clone(),
+                    diff: String::new(),
+                };
+                entry["fixes"] = json!([FixGenerator::to_sarif_fix(
+                    &fix,
+                    &generated.file,
+                    generated.line,
+                )]);
+            }
+
+            entry
+        })
+        .collect();
+
+    let sarif = json!({
+        "$schema": "https://raw.githubusercontent.com/oasis-tcs/sarif-spec/master/Schemata/sarif-schema-2.1.0.json",
+        "version": "2.1.0",
+        "runs": [{
+            "tool": {
+                "driver": {
+                    "name": "vulnera-sast",
+                    "version": env!("CARGO_PKG_VERSION"),
+                    "informationUri": "https://github.com/k5602/vulnera"
+                }
+            },
+            "results": sarif_results
+        }]
+    });
+
+    println!("{}", serde_json::to_string_pretty(&sarif)?);
+    Ok(())
 }

@@ -133,6 +133,7 @@ impl ExecuteSastScanUseCase {
             languages_detected: args.languages.clone(),
             findings,
             summary,
+            remediation: None,
         })
     }
 }

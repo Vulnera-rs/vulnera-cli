@@ -5,4 +5,5 @@ pub mod deps;
 pub mod generate_fix;
 pub mod quota;
 pub mod sast;
+pub mod sast_fix;
 pub mod secrets;
