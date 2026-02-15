@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 use anyhow::Result;
 
 use crate::commands::sast::{
-    SastDepsSuggestion, SastFixReport, SastFixSuggestion, SastGeneratedFix, SastFinding,
+    SastDepsSuggestion, SastFinding, SastFixReport, SastFixSuggestion, SastGeneratedFix,
 };
 use crate::context::CliContext;
 use crate::fix_generator::FixGenerator;
@@ -169,7 +169,13 @@ mod tests {
     use crate::api_client::SimpleVulnerability;
     use tempfile::tempdir;
 
-    fn sample_finding(id: &str, rule_id: &str, file: &str, line: u32, suggestion: Option<&str>) -> SastFinding {
+    fn sample_finding(
+        id: &str,
+        rule_id: &str,
+        file: &str,
+        line: u32,
+        suggestion: Option<&str>,
+    ) -> SastFinding {
         SastFinding {
             id: id.to_string(),
             rule_id: rule_id.to_string(),
@@ -190,8 +196,20 @@ mod tests {
     #[test]
     fn test_build_sast_suggestions_deduplicates_same_tuple() {
         let findings = vec![
-            sample_finding("f1", "rule-a", "src/main.rs", 10, Some("Use parameterized query")),
-            sample_finding("f2", "rule-a", "src/main.rs", 10, Some("Use parameterized query")),
+            sample_finding(
+                "f1",
+                "rule-a",
+                "src/main.rs",
+                10,
+                Some("Use parameterized query"),
+            ),
+            sample_finding(
+                "f2",
+                "rule-a",
+                "src/main.rs",
+                10,
+                Some("Use parameterized query"),
+            ),
             sample_finding("f3", "rule-b", "src/lib.rs", 20, None),
         ];
 

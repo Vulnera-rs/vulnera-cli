@@ -1,6 +1,6 @@
-pub mod auth;
 pub mod analyze;
 pub mod api;
+pub mod auth;
 pub mod deps;
 pub mod generate_fix;
 pub mod quota;

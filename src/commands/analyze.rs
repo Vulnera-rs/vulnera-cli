@@ -16,9 +16,7 @@ use serde::Serialize;
 
 use crate::Cli;
 use crate::application::exit_policy;
-use crate::application::use_cases::analyze::{
-    DepsRunStatus, ExecuteAnalyzeUseCase,
-};
+use crate::application::use_cases::analyze::{DepsRunStatus, ExecuteAnalyzeUseCase};
 use crate::context::CliContext;
 use crate::exit_codes;
 use crate::output::{OutputFormat, ProgressIndicator, VulnerabilityDisplay};

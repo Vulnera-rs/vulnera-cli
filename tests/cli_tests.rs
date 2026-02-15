@@ -54,6 +54,18 @@ fn test_sast_help() {
 }
 
 #[test]
+fn test_sast_help_includes_baseline_flags() {
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_vulnera"));
+    cmd.arg("sast")
+        .arg("--help")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("--baseline"))
+        .stdout(predicate::str::contains("--save-baseline"))
+        .stdout(predicate::str::contains("--only-new"));
+}
+
+#[test]
 fn test_secrets_help() {
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_vulnera"));
     cmd.arg("secrets")

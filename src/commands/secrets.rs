@@ -289,4 +289,3 @@ fn output_results(
         !result.findings.is_empty(),
     ))
 }
-

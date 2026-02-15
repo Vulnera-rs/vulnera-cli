@@ -2,8 +2,8 @@
 //!
 //! View and modify CLI configuration.
 
-use std::path::PathBuf;
 use std::path::Path;
+use std::path::PathBuf;
 use std::process::Command;
 
 use anyhow::Result;
@@ -543,8 +543,7 @@ fn install_git_hook(ctx: &CliContext, project_path: &Path, args: &InstallHooksAr
     }
 
     ctx.output.success("Installed git pre-commit hook");
-    ctx.output
-        .info(&format!("Hook path: {:?}", hook_path));
+    ctx.output.info(&format!("Hook path: {:?}", hook_path));
     Ok(exit_codes::SUCCESS)
 }
 
@@ -578,9 +577,8 @@ fn install_precommit_hook(
 
     ctx.output
         .success("Updated .pre-commit-config.yaml with vulnera hook");
-    ctx.output.info(
-        "Run 'pre-commit install' in this project to enable the hook",
-    );
+    ctx.output
+        .info("Run 'pre-commit install' in this project to enable the hook");
     Ok(exit_codes::SUCCESS)
 }
 

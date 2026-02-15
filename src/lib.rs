@@ -12,8 +12,8 @@
 //! - **Credential Storage**: OS keyring with AES-256-GCM encrypted file fallback
 //! - **CI/CD Integration**: Exit codes, SARIF output, non-interactive mode
 
-pub mod application;
 pub mod api_client;
+pub mod application;
 pub mod commands;
 pub mod constants;
 pub mod context;

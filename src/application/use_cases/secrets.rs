@@ -8,7 +8,9 @@ use vulnera_core::domain::module::{AnalysisModule, ModuleConfig};
 use vulnera_secrets::module::SecretDetectionModule;
 
 use crate::application::services::scan_targets::resolve_scan_targets;
-use crate::commands::secrets::{SecretFinding, SecretsArgs, SecretsResult, SecretsSummary, SeverityCounts};
+use crate::commands::secrets::{
+    SecretFinding, SecretsArgs, SecretsResult, SecretsSummary, SeverityCounts,
+};
 use crate::context::CliContext;
 
 pub struct ExecuteSecretsScanUseCase;

@@ -7,9 +7,7 @@ use clap::{Args, Subcommand};
 use serde::Serialize;
 
 use crate::Cli;
-use crate::application::use_cases::quota::{
-    QuotaServerStatus, ShowQuotaUseCase, SyncQuotaUseCase,
-};
+use crate::application::use_cases::quota::{QuotaServerStatus, ShowQuotaUseCase, SyncQuotaUseCase};
 use crate::context::CliContext;
 use crate::exit_codes;
 use crate::output::OutputFormat;
@@ -152,7 +150,8 @@ async fn sync_quota(ctx: &mut CliContext, cli: &Cli) -> Result<i32> {
             if error_text.contains("offline mode") {
                 ctx.output.error("Cannot sync quota in offline mode");
             } else {
-                ctx.output.error(&format!("Failed to sync quota: {}", error_text));
+                ctx.output
+                    .error(&format!("Failed to sync quota: {}", error_text));
             }
             return Ok(exit_codes::NETWORK_ERROR);
         }

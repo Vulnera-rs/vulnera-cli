@@ -4,19 +4,19 @@
 //! Works fully offline using embedded vulnera-sast module.
 
 use std::path::PathBuf;
+use std::{collections::HashSet, fs};
 
 use anyhow::Result;
 use clap::Args;
 use serde::Serialize;
 use serde_json::json;
+use sha2::{Digest, Sha256};
 
 use crate::Cli;
 use crate::application::exit_policy;
 use crate::application::services::watch_runner;
 use crate::application::use_cases::sast::ExecuteSastScanUseCase;
-use crate::application::use_cases::sast_fix::{
-    ExecuteSastBulkFixUseCase, SastFixExecutionOutcome,
-};
+use crate::application::use_cases::sast_fix::{ExecuteSastBulkFixUseCase, SastFixExecutionOutcome};
 use crate::context::CliContext;
 use crate::exit_codes;
 use crate::fix_generator::FixGenerator;
@@ -68,6 +68,18 @@ pub struct SastArgs {
     /// Generate LLM-powered bulk fixes and remediation suggestions
     #[arg(long)]
     pub fix: bool,
+
+    /// Path to a baseline file for differential SAST comparisons
+    #[arg(long)]
+    pub baseline: Option<PathBuf>,
+
+    /// Save current findings to baseline file (requires --baseline)
+    #[arg(long)]
+    pub save_baseline: bool,
+
+    /// Only report findings not present in baseline (requires --baseline)
+    #[arg(long)]
+    pub only_new: bool,
 }
 
 /// SAST analysis result
@@ -79,7 +91,32 @@ pub struct SastResult {
     pub findings: Vec<SastFinding>,
     pub summary: SastSummary,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub diff_summary: Option<SastDiffSummary>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub remediation: Option<SastFixReport>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct SastDiffSummary {
+    pub baseline_findings: usize,
+    pub current_findings: usize,
+    pub new_findings: usize,
+    pub resolved_findings: usize,
+}
+
+#[derive(Debug, Clone, Serialize, serde::Deserialize)]
+struct SastBaseline {
+    version: String,
+    generated_at: String,
+    findings: Vec<SastBaselineFinding>,
+}
+
+#[derive(Debug, Clone, Serialize, serde::Deserialize)]
+struct SastBaselineFinding {
+    rule_id: String,
+    file: String,
+    line: u32,
+    message: String,
 }
 
 #[derive(Debug, Clone, Default, Serialize)]
@@ -224,6 +261,45 @@ async fn run_single_scan(
         }
     };
 
+    if args.save_baseline && args.baseline.is_none() {
+        ctx.output
+            .error("--save-baseline requires --baseline <path>");
+        return Ok(exit_codes::CONFIG_ERROR);
+    }
+    if args.only_new && args.baseline.is_none() {
+        ctx.output.error("--only-new requires --baseline <path>");
+        return Ok(exit_codes::CONFIG_ERROR);
+    }
+
+    if let Some(baseline_path) = &args.baseline {
+        let baseline = if baseline_path.exists() {
+            Some(load_baseline(baseline_path)?)
+        } else {
+            None
+        };
+
+        if let Some(ref existing_baseline) = baseline {
+            let diff = compute_diff_summary(existing_baseline, &result.findings);
+            if args.only_new {
+                result.findings = filter_new_findings(existing_baseline, &result.findings);
+                recompute_summary(&mut result.summary, &result.findings);
+            }
+            result.diff_summary = Some(diff);
+        }
+
+        if args.save_baseline {
+            let baseline_payload = build_baseline(&result.findings);
+            save_baseline(baseline_path, &baseline_payload)?;
+            if !cli.quiet {
+                ctx.output.success(&format!(
+                    "Baseline saved: {} findings -> {}",
+                    baseline_payload.findings.len(),
+                    baseline_path.display()
+                ));
+            }
+        }
+    }
+
     if args.fix {
         match ExecuteSastBulkFixUseCase::execute(ctx, path, &result.findings, cli.offline).await? {
             SastFixExecutionOutcome::Success(report) => {
@@ -239,14 +315,17 @@ async fn run_single_scan(
             }
             SastFixExecutionOutcome::OfflineMode(report) => {
                 if !cli.quiet {
-                    ctx.output.warn("--fix in offline mode: using local SAST suggestions only");
+                    ctx.output
+                        .warn("--fix in offline mode: using local SAST suggestions only");
                 }
                 result.remediation = Some(report);
             }
             SastFixExecutionOutcome::AuthenticationRequired(report) => {
                 if !cli.quiet {
-                    ctx.output.warn("--fix requires authentication for LLM generation");
-                    ctx.output.info("Run 'vulnera auth login' to enable bulk LLM fixes");
+                    ctx.output
+                        .warn("--fix requires authentication for LLM generation");
+                    ctx.output
+                        .info("Run 'vulnera auth login' to enable bulk LLM fixes");
                 }
                 result.remediation = Some(report);
             }
@@ -255,7 +334,8 @@ async fn run_single_scan(
             }
             SastFixExecutionOutcome::MissingApiClient(report) => {
                 if !cli.quiet {
-                    ctx.output.warn("API client unavailable for LLM fix generation");
+                    ctx.output
+                        .warn("API client unavailable for LLM fix generation");
                 }
                 result.remediation = Some(report);
             }
@@ -344,6 +424,16 @@ fn output_results(
             } else if !cli.quiet {
                 ctx.output.print_findings_table(&result.findings);
 
+                if let Some(diff) = &result.diff_summary {
+                    ctx.output.print(&format!(
+                        "\nDiff: {} new, {} resolved (baseline {}, current {})",
+                        diff.new_findings,
+                        diff.resolved_findings,
+                        diff.baseline_findings,
+                        diff.current_findings
+                    ));
+                }
+
                 ctx.output.print(&format!(
                     "\nSummary: {} total ({} critical, {} high, {} medium, {} low)",
                     result.summary.total_findings,
@@ -424,8 +514,7 @@ fn print_sarif_with_fixes(result: &SastResult, remediation: &SastFixReport) -> R
     let sarif_results: Vec<serde_json::Value> = result
         .findings
         .iter()
-        .enumerate()
-        .map(|(idx, finding)| {
+        .map(|finding| {
             let mut entry = json!({
                 "ruleId": finding.rule_id,
                 "level": match finding.severity.to_lowercase().as_str() {
@@ -447,7 +536,7 @@ fn print_sarif_with_fixes(result: &SastResult, remediation: &SastFixReport) -> R
                     }
                 }],
                 "partialFingerprints": {
-                    "primaryLocationLineHash": format!("{}_{}", finding.id, idx)
+                    "primaryLocationLineHash": stable_finding_fingerprint(finding)
                 }
             });
 
@@ -487,4 +576,198 @@ fn print_sarif_with_fixes(result: &SastResult, remediation: &SastFixReport) -> R
 
     println!("{}", serde_json::to_string_pretty(&sarif)?);
     Ok(())
+}
+
+fn finding_fingerprint(f: &SastFinding) -> String {
+    format!("{}|{}|{}|{}", f.rule_id, f.file, f.line, f.message)
+}
+
+fn baseline_fingerprint(f: &SastBaselineFinding) -> String {
+    format!("{}|{}|{}|{}", f.rule_id, f.file, f.line, f.message)
+}
+
+fn build_baseline(findings: &[SastFinding]) -> SastBaseline {
+    let findings = findings
+        .iter()
+        .map(|f| SastBaselineFinding {
+            rule_id: f.rule_id.clone(),
+            file: f.file.clone(),
+            line: f.line,
+            message: f.message.clone(),
+        })
+        .collect();
+
+    SastBaseline {
+        version: env!("CARGO_PKG_VERSION").to_string(),
+        generated_at: chrono::Utc::now().to_rfc3339(),
+        findings,
+    }
+}
+
+fn load_baseline(path: &std::path::Path) -> Result<SastBaseline> {
+    let content = fs::read_to_string(path)?;
+    Ok(serde_json::from_str(&content)?)
+}
+
+fn save_baseline(path: &std::path::Path, baseline: &SastBaseline) -> Result<()> {
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    let json = serde_json::to_string_pretty(baseline)?;
+    fs::write(path, json)?;
+    Ok(())
+}
+
+fn compute_diff_summary(baseline: &SastBaseline, current: &[SastFinding]) -> SastDiffSummary {
+    let baseline_set: HashSet<String> =
+        baseline.findings.iter().map(baseline_fingerprint).collect();
+    let current_set: HashSet<String> = current.iter().map(finding_fingerprint).collect();
+
+    let new_findings = current_set.difference(&baseline_set).count();
+    let resolved_findings = baseline_set.difference(&current_set).count();
+
+    SastDiffSummary {
+        baseline_findings: baseline_set.len(),
+        current_findings: current_set.len(),
+        new_findings,
+        resolved_findings,
+    }
+}
+
+fn filter_new_findings(baseline: &SastBaseline, current: &[SastFinding]) -> Vec<SastFinding> {
+    let baseline_set: HashSet<String> =
+        baseline.findings.iter().map(baseline_fingerprint).collect();
+
+    current
+        .iter()
+        .filter(|f| !baseline_set.contains(&finding_fingerprint(f)))
+        .cloned()
+        .collect()
+}
+
+fn recompute_summary(summary: &mut SastSummary, findings: &[SastFinding]) {
+    summary.total_findings = findings.len();
+    summary.critical = 0;
+    summary.high = 0;
+    summary.medium = 0;
+    summary.low = 0;
+
+    for finding in findings {
+        match finding.severity.as_str() {
+            "critical" => summary.critical += 1,
+            "high" => summary.high += 1,
+            "medium" => summary.medium += 1,
+            "low" => summary.low += 1,
+            _ => {}
+        }
+    }
+}
+
+fn stable_finding_fingerprint(finding: &SastFinding) -> String {
+    let key = format!(
+        "{}|{}|{}|{}",
+        finding.rule_id, finding.file, finding.line, finding.message
+    );
+    let mut hasher = Sha256::new();
+    hasher.update(key.as_bytes());
+    format!("{:x}", hasher.finalize())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn sample_finding(id: &str, rule: &str, file: &str, line: u32, msg: &str) -> SastFinding {
+        SastFinding {
+            id: id.to_string(),
+            rule_id: rule.to_string(),
+            severity: "high".to_string(),
+            category: "SAST".to_string(),
+            message: msg.to_string(),
+            file: file.to_string(),
+            line,
+            column: None,
+            end_line: None,
+            snippet: None,
+            fix_suggestion: None,
+            cwe: None,
+            owasp: None,
+        }
+    }
+
+    #[test]
+    fn test_compute_diff_summary_counts_new_and_resolved() {
+        let baseline = SastBaseline {
+            version: "test".to_string(),
+            generated_at: "now".to_string(),
+            findings: vec![
+                SastBaselineFinding {
+                    rule_id: "r1".to_string(),
+                    file: "a.py".to_string(),
+                    line: 10,
+                    message: "m1".to_string(),
+                },
+                SastBaselineFinding {
+                    rule_id: "r2".to_string(),
+                    file: "b.py".to_string(),
+                    line: 20,
+                    message: "m2".to_string(),
+                },
+            ],
+        };
+
+        let current = vec![
+            sample_finding("1", "r1", "a.py", 10, "m1"),
+            sample_finding("2", "r3", "c.py", 30, "m3"),
+        ];
+
+        let diff = compute_diff_summary(&baseline, &current);
+        assert_eq!(diff.baseline_findings, 2);
+        assert_eq!(diff.current_findings, 2);
+        assert_eq!(diff.new_findings, 1);
+        assert_eq!(diff.resolved_findings, 1);
+    }
+
+    #[test]
+    fn test_filter_new_findings_returns_only_non_baseline_entries() {
+        let baseline = SastBaseline {
+            version: "test".to_string(),
+            generated_at: "now".to_string(),
+            findings: vec![SastBaselineFinding {
+                rule_id: "r1".to_string(),
+                file: "a.py".to_string(),
+                line: 10,
+                message: "m1".to_string(),
+            }],
+        };
+
+        let current = vec![
+            sample_finding("1", "r1", "a.py", 10, "m1"),
+            sample_finding("2", "r2", "b.py", 20, "m2"),
+        ];
+
+        let only_new = filter_new_findings(&baseline, &current);
+        assert_eq!(only_new.len(), 1);
+        assert_eq!(only_new[0].rule_id, "r2");
+    }
+
+    #[test]
+    fn test_stable_fingerprint_is_deterministic_and_content_based() {
+        let finding_a = sample_finding("id-a", "r1", "a.py", 10, "m1");
+        let finding_b = sample_finding("id-b", "r1", "a.py", 10, "m1");
+
+        let hash_a = stable_finding_fingerprint(&finding_a);
+        let hash_b = stable_finding_fingerprint(&finding_b);
+
+        assert_eq!(hash_a, hash_b, "Fingerprint should ignore volatile IDs");
+        assert_eq!(
+            hash_a.len(),
+            64,
+            "SHA-256 hex fingerprint length must be 64"
+        );
+        assert!(
+            hash_a.chars().all(|c| c.is_ascii_hexdigit()),
+            "Fingerprint must be lowercase hex"
+        );
+    }
 }

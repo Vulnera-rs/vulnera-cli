@@ -133,12 +133,16 @@ impl ExecuteSastScanUseCase {
             languages_detected: args.languages.clone(),
             findings,
             summary,
+            diff_summary: None,
             remediation: None,
         })
     }
 }
 
-async fn execute_target(sast_module: &SastModule, target: &Path) -> Result<vulnera_core::domain::module::ModuleResult> {
+async fn execute_target(
+    sast_module: &SastModule,
+    target: &Path,
+) -> Result<vulnera_core::domain::module::ModuleResult> {
     let module_config = ModuleConfig {
         job_id: Uuid::new_v4(),
         project_id: "cli-local".to_string(),

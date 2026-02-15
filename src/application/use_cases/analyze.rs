@@ -4,9 +4,9 @@ use crate::application::services::scan_targets::collect_changed_files;
 use crate::application::use_cases::deps::ExecuteDepsScanUseCase;
 use crate::application::use_cases::sast::ExecuteSastScanUseCase;
 use crate::application::use_cases::secrets::ExecuteSecretsScanUseCase;
+use crate::commands::analyze::{AnalysisResult, AnalyzeArgs, VulnerabilityInfo};
 use crate::commands::sast::SastArgs;
 use crate::commands::secrets::SecretsArgs;
-use crate::commands::analyze::{AnalysisResult, AnalyzeArgs, VulnerabilityInfo};
 use crate::context::CliContext;
 use crate::severity::severity_meets_minimum_str;
 
@@ -85,7 +85,10 @@ impl ExecuteAnalyzeUseCase {
             status
         };
 
-        AnalyzeExecutionOutcome { result, deps_status }
+        AnalyzeExecutionOutcome {
+            result,
+            deps_status,
+        }
     }
 
     async fn run_sast_analysis(
@@ -106,6 +109,9 @@ impl ExecuteAnalyzeUseCase {
             no_cache: false,
             watch: false,
             fix: false,
+            baseline: None,
+            save_baseline: false,
+            only_new: false,
         };
 
         match ExecuteSastScanUseCase::execute(ctx, &mapped, path).await {
@@ -186,18 +192,18 @@ impl ExecuteAnalyzeUseCase {
     ) {
         let changed_api_targets = if changed_only {
             collect_changed_files(path)
-            .ok()
-            .map(|files| {
-                files
-                    .into_iter()
-                    .filter(|f| {
-                        f.extension()
-                            .and_then(|e| e.to_str())
-                            .is_some_and(|ext| matches!(ext, "yaml" | "yml" | "json"))
-                    })
-                    .collect::<Vec<_>>()
-            })
-            .unwrap_or_default()
+                .ok()
+                .map(|files| {
+                    files
+                        .into_iter()
+                        .filter(|f| {
+                            f.extension()
+                                .and_then(|e| e.to_str())
+                                .is_some_and(|ext| matches!(ext, "yaml" | "yml" | "json"))
+                        })
+                        .collect::<Vec<_>>()
+                })
+                .unwrap_or_default()
         } else {
             Vec::new()
         };
@@ -218,7 +224,10 @@ impl ExecuteAnalyzeUseCase {
                                 id: finding.rule_id.unwrap_or_else(|| finding.id.clone()),
                                 severity: finding.severity,
                                 package: finding.file.clone(),
-                                version: finding.line.map(|l| format!("L{}", l)).unwrap_or_default(),
+                                version: finding
+                                    .line
+                                    .map(|l| format!("L{}", l))
+                                    .unwrap_or_default(),
                                 description: finding.description,
                                 module: finding.module,
                                 file: Some(finding.file),
@@ -276,27 +285,27 @@ impl ExecuteAnalyzeUseCase {
         min_severity: &str,
         changed_only: bool,
     ) -> DepsRunStatus {
-        if changed_only
-            && let Ok(changed_files) = collect_changed_files(path)
-        {
+        if changed_only && let Ok(changed_files) = collect_changed_files(path) {
             let manifest_changed = changed_files.iter().any(|file| {
-                file.file_name().and_then(|n| n.to_str()).is_some_and(|name| {
-                    matches!(
-                        name,
-                        "package.json"
-                            | "package-lock.json"
-                            | "yarn.lock"
-                            | "pnpm-lock.yaml"
-                            | "Cargo.toml"
-                            | "Cargo.lock"
-                            | "requirements.txt"
-                            | "Pipfile"
-                            | "pyproject.toml"
-                            | "pom.xml"
-                            | "build.gradle"
-                            | "go.mod"
-                    )
-                })
+                file.file_name()
+                    .and_then(|n| n.to_str())
+                    .is_some_and(|name| {
+                        matches!(
+                            name,
+                            "package.json"
+                                | "package-lock.json"
+                                | "yarn.lock"
+                                | "pnpm-lock.yaml"
+                                | "Cargo.toml"
+                                | "Cargo.lock"
+                                | "requirements.txt"
+                                | "Pipfile"
+                                | "pyproject.toml"
+                                | "pom.xml"
+                                | "build.gradle"
+                                | "go.mod"
+                        )
+                    })
             });
 
             if !manifest_changed {

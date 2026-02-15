@@ -53,9 +53,9 @@ impl ExecuteApiScanUseCase {
                 file: Some(f.location.path),
                 line: f.location.line,
                 owasp_category: None,
-                remediation: f
-                    .recommendation
-                    .unwrap_or_else(|| "Review and fix the identified API security issue".to_string()),
+                remediation: f.recommendation.unwrap_or_else(|| {
+                    "Review and fix the identified API security issue".to_string()
+                }),
             })
             .collect();
 

@@ -147,7 +147,8 @@ pub async fn run(ctx: &CliContext, cli: &Cli, args: &ApiArgs) -> Result<i32> {
         Ok(ApiExecutionOutcome::Success(result)) => result,
         Ok(ApiExecutionOutcome::NoSpecFound) => {
             if !cli.quiet {
-                ctx.output.info("No OpenAPI specification found in directory");
+                ctx.output
+                    .info("No OpenAPI specification found in directory");
                 ctx.output
                     .info("To analyze an API, provide a spec file with --spec");
             }
@@ -211,4 +212,3 @@ pub async fn run(ctx: &CliContext, cli: &Cli, args: &ApiArgs) -> Result<i32> {
         !result.findings.is_empty(),
     ))
 }
-
