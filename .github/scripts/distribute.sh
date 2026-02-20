@@ -29,7 +29,7 @@ rm -rf "$PACKAGE_DIR" "$ARCHIVE_PATH" "$CHECKSUM_PATH"
 mkdir -p "$PACKAGE_DIR"
 
 echo "Building $PACKAGE_NAME"
-cargo build --release --locked --manifest-path "$MANIFEST_PATH" --target "$TARGET"
+cargo build --release --manifest-path "$MANIFEST_PATH" --target "$TARGET"
 
 BIN_PATH="$ROOT_DIR/target/$TARGET/release/$BIN_NAME"
 if [[ ! -f "$BIN_PATH" ]]; then

@@ -337,7 +337,7 @@ impl OutputWriter {
                     "driver": {
                         "name": tool_name,
                         "version": tool_version,
-                        "informationUri": "https://github.com/k5602/vulnera"
+                        "informationUri": "https://github.com/Vulnera-rs/vulnera"
                     }
                 },
                 "results": results
@@ -359,7 +359,7 @@ impl OutputWriter {
                     "driver": {
                         "name": "vulnera",
                         "version": env!("CARGO_PKG_VERSION"),
-                        "informationUri": "https://github.com/k5602/vulnera"
+                        "informationUri": "https://github.com/Vulnera-rs/vulnera"
                     }
                 },
                 "results": vulnerabilities

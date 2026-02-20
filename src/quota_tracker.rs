@@ -187,18 +187,38 @@ impl QuotaTracker {
     /// Try to consume a quota request
     ///
     /// Returns `true` if the request is allowed, `false` if quota exceeded.
+    /// Try to consume a quota request
+    ///
+    /// Returns `true` if the request is allowed, `false` if quota exceeded.
     pub async fn try_consume(&mut self) -> Result<bool> {
-        // Refresh state in case date changed
-        self.state = Self::load_state(&self.quota_file)?;
+        self.try_consume_for_module("default").await
+    }
 
-        if self.state.used >= self.daily_limit {
-            return Ok(false);
+    /// Try to consume a quota request for a specific module.
+    ///
+    /// Offline modules (SAST, Secrets, API) are cost-free as they run locally.
+    /// Online modules (Deps, LLM fixes) consume from the daily quota as they use
+    /// server-side infrastructure and models.
+    pub async fn try_consume_for_module(&mut self, module: &str) -> Result<bool> {
+        match module.to_lowercase().as_str() {
+            "sast" | "secrets" | "api" => {
+                tracing::debug!("Module {} is local-only and cost-free", module);
+                Ok(true)
+            }
+            _ => {
+                // Refresh state in case date changed
+                self.state = Self::load_state(&self.quota_file)?;
+
+                if self.state.used >= self.daily_limit {
+                    return Ok(false);
+                }
+
+                self.state.used += 1;
+                self.save_state()?;
+
+                Ok(true)
+            }
         }
-
-        self.state.used += 1;
-        self.save_state()?;
-
-        Ok(true)
     }
 
     /// Get remaining quota
@@ -345,6 +365,29 @@ mod tests {
         // Should allow first request
         assert!(tracker.try_consume().await?);
         assert_eq!(tracker.remaining(), 9);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_offline_modules_are_free() -> Result<()> {
+        let (mut tracker, _temp) = test_tracker(false)?;
+
+        // SAST should be free
+        assert!(tracker.try_consume_for_module("sast").await?);
+        assert_eq!(tracker.used(), 0);
+
+        // Secrets should be free
+        assert!(tracker.try_consume_for_module("secrets").await?);
+        assert_eq!(tracker.used(), 0);
+
+        // API should be free
+        assert!(tracker.try_consume_for_module("api").await?);
+        assert_eq!(tracker.used(), 0);
+
+        // Deps should NOT be free
+        assert!(tracker.try_consume_for_module("deps").await?);
+        assert_eq!(tracker.used(), 1);
+
         Ok(())
     }
 

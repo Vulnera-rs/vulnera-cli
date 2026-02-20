@@ -567,7 +567,7 @@ fn print_sarif_with_fixes(result: &SastResult, remediation: &SastFixReport) -> R
                 "driver": {
                     "name": "vulnera-sast",
                     "version": env!("CARGO_PKG_VERSION"),
-                    "informationUri": "https://github.com/k5602/vulnera"
+                    "informationUri": "https://github.com/Vulnera-rs/vulnera"
                 }
             },
             "results": sarif_results

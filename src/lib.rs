@@ -45,9 +45,9 @@ use std::path::PathBuf;
     about = "Comprehensive vulnerability analysis for your codebase",
     long_about = "Vulnera CLI provides offline-first vulnerability analysis including dependency \
                   scanning, SAST, secret detection, and API security analysis.\n\n\
-                  Offline modules: SAST, Secrets, API Security\n\
+                  Offline modules: SAST, Secrets, API Security (Free & Unlimited)\n\
                   Online modules: Dependency vulnerability scanning (requires server)\n\n\
-                  Daily limits: 10 requests unauthenticated, 40 with API key.\n\
+                  Daily limits (Online modules): 10 requests unauthenticated, 40 with API key.\n\
                   Run 'vulnera auth login' to authenticate for higher limits."
 )]
 pub struct Cli {

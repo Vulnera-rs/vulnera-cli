@@ -31,11 +31,7 @@ impl ExecuteGenerateFixUseCase {
             return Ok(GenerateFixExecutionOutcome::AuthenticationRequired);
         }
 
-        if ctx.remaining_quota() == 0 {
-            return Ok(GenerateFixExecutionOutcome::QuotaExceeded);
-        }
-
-        if !ctx.consume_quota().await? {
+        if !ctx.quota.try_consume_for_module("llm").await? {
             return Ok(GenerateFixExecutionOutcome::QuotaExceeded);
         }
 

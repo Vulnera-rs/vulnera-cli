@@ -18,11 +18,7 @@ impl ExecuteDepsScanUseCase {
             return Err(anyhow!("Dependency analysis requires server connection"));
         }
 
-        if ctx.remaining_quota() == 0 {
-            return Err(anyhow!("Quota exceeded"));
-        }
-
-        if !ctx.consume_quota().await? {
+        if !ctx.quota.try_consume_for_module("deps").await? {
             return Err(anyhow!("Quota exceeded"));
         }
 

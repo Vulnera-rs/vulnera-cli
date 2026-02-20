@@ -151,7 +151,7 @@ fn print_sarif(result: &GenerateFixResult) -> Result<()> {
                 "driver": {
                     "name": "vulnera",
                     "version": env!("CARGO_PKG_VERSION"),
-                    "informationUri": "https://github.com/k5602/vulnera"
+                    "informationUri": "https://github.com/Vulnera-rs/vulnera"
                 }
             },
             "results": [result_obj]
